@@ -309,9 +309,10 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=200 \
     trainer.test_freq=500 \
     trainer.total_epochs=1 \
+    trainer.total_training_steps=300 \
     trainer.default_local_dir="$CKPT_PATH" \
     trainer.is_plot=$IS_PLOT \
-
+##验证先跑300步
 # Log the end time for local runs.
 if [ -z "$SLURM_JOB_ID" ]; then
     echo "=========================================="

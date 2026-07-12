@@ -1,22 +1,14 @@
-<<<<<<< HEAD
 # OPRD-High-Entropy
 =======
 # OPRD: On-Policy Representation Distillation
 
+> **News**
+> - [2026/06] We now support **cross-architecture** and **cross-tokenizer** distillation via OPRD-Bridge (e.g., Phi-4-mini-reasoning -> Qwen3-1.7B with completely different tokenizers).
+> - [2026/06] Paper released: [OPRD: On-Policy Representation Distillation](https://arxiv.org/abs/2606.06021).
+
 **Representation-level on-policy distillation for large language models, built on the [OPD](https://github.com/thunlp/OPD) training stack.**
 
----
-
-## 🔔 News
-
-- **[2026/06/22]** New arXiv update! The latest version of our paper on cross-architecture and cross-vocabulary representation distillation is now live! Check it out here: https://arxiv.org/abs/2606.06021
-- **[2026/06/20]** We now support **cross-architecture** and **cross-tokenizer** distillation via OPRD-Bridge (e.g., Phi-4-mini-reasoning -> Qwen3-1.7B with completely different tokenizers).
-- **[2026/06/04]** Paper released: [OPRD: On-Policy Representation Distillation](https://arxiv.org/abs/2606.06021).
-
----
-
 [Paper (OPRD)](https://arxiv.org/abs/2606.06021)
-[Project Page](https://shenzhiyang2000.github.io/OPRD-project-page/)
 [Upstream OPD](https://github.com/thunlp/OPD)
 [Paper (OPD)](https://arxiv.org/abs/2604.13016)
 [verl](https://github.com/verl-project/verl)
@@ -235,4 +227,4 @@ This repository extends the open-source implementation of **On-Policy Distillati
 > [Paper](https://arxiv.org/abs/2604.13016) | [GitHub (thunlp/OPD)](https://github.com/thunlp/OPD)
 
 We thank the OPD authors for the training recipe, analysis, and verl-based codebase that this project builds upon.
->>>>>>> 6cedd0d (Support cross-architecture and cross-vocabulary distillation)
+
