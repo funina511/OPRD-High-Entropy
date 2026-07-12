@@ -31,7 +31,8 @@ fi
 ray stop --force
 export RAY_memory_usage_threshold=0.99
 export CUDA_LAUNCH_BLOCKING=1
-# export CUDA_VISIBLE_DEVICES=1,2,3,4
+# export CUDA_VISIBLE_DEVICES=4,5,6,7 
+export CUDA_VISIBLE_DEVICES=0,1,2,3 
 export PYTHONUNBUFFERED=1
 # Set to 1 to log mem/actor_update_* metrics (peak GPU during update_policy; compare rep-only vs top-k)
 export ACTOR_UPDATE_MEM_PROFILE=0
@@ -52,10 +53,10 @@ export GRPO_OUTCOME_WEIGHT=1.0
 
 # DeepMath-103K
 export MAX_PROMPT_LENGTH=2048
-export MAX_RESP_LENGTH=16384  # TODO: 31744 /15360 / 7168 / 3072 / 5120
-export MAX_VAL_RESP_LENGTH=15360 # TODO: 15360 / 7168 / 3072
+export MAX_RESP_LENGTH=8192  # TODO: 31744 /15360 / 7168 / 3072 / 5120
+export MAX_VAL_RESP_LENGTH=8192 # TODO: 15360 / 7168 / 3072
 export MAX_MODEL_LEN=$(( MAX_RESP_LENGTH + MAX_PROMPT_LENGTH > MAX_VAL_RESP_LENGTH + MAX_PROMPT_LENGTH ? MAX_RESP_LENGTH + MAX_PROMPT_LENGTH : MAX_VAL_RESP_LENGTH + MAX_PROMPT_LENGTH ))
-export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-8} # TODO: 1 / 8 / 16 / 32 / 64 (default 64)
+export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-4} # TODO: 1 / 8 / 16 / 32 / 64 (default 64)
 export TEMPERATURE=${TEMPERATURE:-1.0} # TODO: 0.6 / 0.8 / 1.0 / 1.2 (default 1.0)
 export TEACHER_TEMPERATURE=${TEACHER_TEMPERATURE:-1.0} # Teacher logits temperature (default 1.0, no scaling)
 export REPETITION_PENALTY=${REPETITION_PENALTY:-1.0} # TODO: 1.0 / 1.1 / 1.2 (default 1.0, no penalty)
@@ -67,7 +68,7 @@ export REWARD_WEIGHT_MODE=${REWARD_WEIGHT_MODE:-"student_p"} # "student_p" or "t
 # export LR_SCHEDULER=${LR_SCHEDULER:-constant}
 export USE_KL=${USE_KL:-False} # TODO: True / False (default False)
 export ENABLE_FORMAT_REWARD=${ENABLE_FORMAT_REWARD:-False} # TODO: True / False (default False)
-export MODEL_DTYPE=${MODEL_DTYPE:-fp32} # actor/ref/critic fsdp_config.model_dtype: fp32 or bfloat16
+export MODEL_DTYPE=${MODEL_DTYPE:-bfloat16} # actor/ref/critic fsdp_config.model_dtype: fp32 or bfloat16
 export IS_PLOT=${IS_PLOT:-True} # TODO: True / False (default False)
 export LOSS_AGG_MODE=${LOSS_AGG_MODE:-"token-mean"} # TODO: "token-mean" / "seq-mean-token-sum" / "seq-mean-token-mean" / "seq-mean-token-sum-norm" (default "token-mean")
 # Top-K OPD backward is VRAM-heavy on long responses; activation offload can also trigger errors.
@@ -80,7 +81,7 @@ export REP_DISTILLATION_ONLY=${REP_DISTILLATION_ONLY:-False}
 export REP_DISTILLATION_COEF=${REP_DISTILLATION_COEF:-1.0}
 # Rep token positions: last | all | last_k | first_k
 export REP_DISTILLATION_POSITIONS=${REP_DISTILLATION_POSITIONS:-first_k}
-export REP_DISTILLATION_LAST_K=${REP_DISTILLATION_LAST_K:-32}
+export REP_DISTILLATION_LAST_K=${REP_DISTILLATION_LAST_K:-128}
 export REP_DISTILLATION_FIRST_K=${REP_DISTILLATION_FIRST_K:-50}
 # Rep transformer layers: last | all | even | odd
 export REP_DISTILLATION_LAYERS=${REP_DISTILLATION_LAYERS:-last}
@@ -103,7 +104,8 @@ export ATT_DISTILLATION_TEMPERATURE=${ATT_DISTILLATION_TEMPERATURE:-1.0}
 # export TRAIN_DATASET=datasets/OpenThoughts3-1.2M/OpenThoughts3_opd.parquet
 # export TRAIN_DATASET=datasets/OpenThoughts3-1.2M/sampled_complement_30k.parquet
 # export TRAIN_DATASET=datasets/DeepMath-103K/verl_format/train_filtered_sampled.parquet
-export TRAIN_DATASET=../datasets/dapo-math-17k.parquet
+# export TRAIN_DATASET=../datasets/dapo-math-17k.parquet
+export TRAIN_DATASET=../datasets/dapo-math-5k-seed42.parquet
 # export TRAIN_DATASET=${DATA_DIR}/DeepMath-103K/train_filtered_level6.parquet
 # export TRAIN_DATASET=datasets/Skywork-OR1-RL-Data/data/math-00000-of-00001.parquet
 # export TRAIN_DATASET=datasets/Skywork-OR1-RL-Data/filtered/math-1p5b-filtered-diff-max8.parquet
@@ -139,7 +141,7 @@ TEST_DATASET=${TEST_FILE:-["$TEST_DATA_DIR/AMC23/test.parquet"]}
 # export ACTOR_MODEL_PATH=${MODEL_DIR}/Qwen3-4B
 # export ACTOR_MODEL_PATH=${MODEL_DIR}/DeepSeek-R1-Distill-Qwen-1.5B
 # export ACTOR_MODEL_PATH=${CKPT_DIR}/token_reward_direct_..._global_step_10_oprd_r8
-export ACTOR_MODEL_PATH=${MODEL_DIR}/Qwen3-1.7B-Base
+export ACTOR_MODEL_PATH=${MODEL_DIR}/Qwen3-0.6B-Base
 # export ACTOR_MODEL_PATH=${CKPT_DIR}/Qwen3-1.7B-Base-SFT-OpenThought3-4B/checkpoint-400
 # export ACTOR_MODEL_PATH=model/JustRL-DeepSeek-1.5B
 # export ACTOR_MODEL_PATH=model/Qwen3-1.7B-SFT
@@ -162,7 +164,7 @@ export ACTOR_MODEL_NAME=$(basename "$ACTOR_MODEL_PATH")
 # export REWARD_MODEL_PATH=model/DeepSeek-R1-Distill-Qwen-14B
 # export REWARD_MODEL_PATH=${MODEL_DIR}/JustRL-DeepSeek-1.5B  
 # export REWARD_MODEL_PATH=${MODEL_DIR}/JustRL-DeepSeek-1.5B
-export REWARD_MODEL_PATH=${MODEL_DIR}/Qwen3-4B
+export REWARD_MODEL_PATH=${MODEL_DIR}/Qwen3-1.7B
 # export REWARD_MODEL_PATH=${MODEL_DIR}/Phi-4-mini-reasoning
 
 export REWARD_MODEL_NAME=$(basename "$REWARD_MODEL_PATH")
@@ -201,7 +203,10 @@ PPO_MAX_TOKEN_LEN_PER_GPU=$(( ((1024 + MAX_RESP_LENGTH) > 32768) ? (1024 + MAX_R
 echo "PPO_MAX_TOKEN_LEN_PER_GPU: $PPO_MAX_TOKEN_LEN_PER_GPU"
 
 
-ray start --head
+export RAY_PORT=${RAY_PORT:-6391}
+ray start --head --port=$RAY_PORT
+
+# ray start --head
 sleep 5
 
 
@@ -276,7 +281,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.n=$N_RESPONSES \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     +actor_rollout_ref.rollout.val_kwargs.max_tokens=$MAX_VAL_RESP_LENGTH \
-    actor_rollout_ref.rollout.val_kwargs.n=16 \
+    actor_rollout_ref.rollout.val_kwargs.n=4 \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.7 \
     actor_rollout_ref.rollout.val_kwargs.top_p=0.95 \
     actor_rollout_ref.rollout.repetition_penalty=$REPETITION_PENALTY \
@@ -294,15 +299,15 @@ python3 -m verl.trainer.main_ppo \
     custom_reward_function.name=reward_func \
     trainer.val_before_train=False \
     trainer.log_val_generations=2 \
-    trainer.logger=['console'] \
+    trainer.logger=['console','wandb'] \
     trainer.output_log_path=${PROJECT_PATH}/logs/terminal/${EXPERIMENT_NAME}.log \
     trainer.project_name=$PROJECT_NAME \
     trainer.experiment_name=$EXPERIMENT_NAME \
     trainer.validation_data_dir=${PROJECT_PATH}/logs/validation_log/$EXPERIMENT_NAME \
-    trainer.n_gpus_per_node=8 \
+    trainer.n_gpus_per_node=4 \
     trainer.nnodes=1 \
     trainer.save_freq=200 \
-    trainer.test_freq=2 \
+    trainer.test_freq=500 \
     trainer.total_epochs=1 \
     trainer.default_local_dir="$CKPT_PATH" \
     trainer.is_plot=$IS_PLOT \
