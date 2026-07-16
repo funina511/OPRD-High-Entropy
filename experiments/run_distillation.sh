@@ -89,7 +89,12 @@ if [ -z "${SLURM_JOB_ID:-}" ]; then
     echo "=========================================="
 fi
 
-ray stop --force || true
+# NOTE: `ray stop --force` kills EVERY ray process on the host, not just this job's.
+# Running two jobs concurrently, the 2nd job's stop would SIGKILL the 1st job's raylet.
+# Set SKIP_RAY_STOP=1 for concurrent runs (each job then owns an isolated RAY_PORT + temp-dir).
+if [ "${SKIP_RAY_STOP:-0}" != "1" ]; then
+    ray stop --force || true
+fi
 export RAY_memory_usage_threshold=0.99
 export CUDA_LAUNCH_BLOCKING=${CUDA_LAUNCH_BLOCKING:-0}
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1,2,3}
@@ -176,7 +181,12 @@ PPO_MAX_TOKEN_LEN_PER_GPU=$(( ((1024 + MAX_RESP_LENGTH) > 32768) ? (1024 + MAX_R
 echo "PPO_MAX_TOKEN_LEN_PER_GPU: $PPO_MAX_TOKEN_LEN_PER_GPU"
 
 export RAY_PORT=${RAY_PORT:-6391}
-ray start --head --port="$RAY_PORT"
+# Isolate each concurrent job on its own Ray head: unique port + temp-dir + explicit
+# address. Without this, two jobs both `ray start --head --port=6391` collide on the
+# default /tmp/ray session and the second one SIGKILLs the first's raylet.
+export RAY_TEMP_DIR=${RAY_TEMP_DIR:-/tmp/ray_${RAY_PORT}}
+ray start --head --port="$RAY_PORT" --temp-dir="$RAY_TEMP_DIR"
+export RAY_ADDRESS="127.0.0.1:${RAY_PORT}"
 sleep 5
 
 python3 -m verl.trainer.main_ppo \
