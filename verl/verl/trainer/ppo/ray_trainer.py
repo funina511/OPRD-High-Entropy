@@ -2415,6 +2415,10 @@ class RayPPOTrainer:
                 if is_last_step:
                     print(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
+                    # Explicitly flush loggers so the final step (metrics + last validation)
+                    # is committed. wandb holds step N pending until a higher step is logged;
+                    # without this the last step is dropped on process exit.
+                    logger.finish()
                     return
 
                 # this is experimental and may be changed/removed in the future

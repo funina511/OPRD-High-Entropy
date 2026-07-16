@@ -1,61 +1,61 @@
 #!/bin/bash
-# Pre-experiment 2 launcher: train P_S with frozen teacher PCA bases P_T.
-# Reuses on-policy pairs from pre-experiment 1.
+# OPRD-Bridge STAGE 1 — build + freeze the low-rank cross-arch bridge (P_T via PCA, P_S trained).
 #
-# Modes (SUBSPACE_MODE):
-#   full    - frozen teacher PCA P_T + trainable P_S (default)
-#   direct  - trainable linear P_S and P_T jointly, no teacher SVD
-#   residual - freeze head bridge, train tail on teacher residual
+# Reads Stage 0's on_policy_pairs.jsonl, recomputes teacher/student hidden states on frozen
+# models, fits teacher PCA bases P_T (top-r directions per layer) and trains the student
+# projectors P_S to align into that r-dim subspace. Writes:
+#   ${OUTPUT_DIR}/rank_${RANKS}/ps_bank.pt      <- the frozen bridge used by Stage 2
+#   ${OUTPUT_DIR}/rank_${RANKS}/results.json    <- fitted subspace cosine/mse curves
+#   ${OUTPUT_DIR}/summary.json
+#
+# NOTE (why this file was rewritten): the previous version passed flags the current
+# cross_arch_preexp2_train_ps.py argparse does NOT accept (--subspace-mode, --position-mode,
+# --first-k, --max-pca-rows, --projector, --mlp-hidden-mult, --compute-probe-cosine) and used
+# --layer-mode even (only all|last|mid are valid) -> it crashed immediately. Fixed here.
+#
+# IMPORTANT: --ranks and --layer-mode MUST match the Stage 2 distillation knobs
+#   REP_LOW_RANK and REP_DISTILLATION_LAYERS (both default to 8 / all in run_oprd_3090.sh).
 
-set -euo pipefail
-
+set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-2}" # 0,1,2,3
+# --- env (verl py3.12; no vLLM here, so expandable_segments is safe and avoids OOM) ---
+source /mnt/lxy/miniconda3/etc/profile.d/conda.sh
+conda activate verl
+export PATH=/mnt/lxy/miniconda3/envs/verl/bin:$PATH
 export PYTHONPATH="${REPO_ROOT}/verl:${PYTHONPATH:-}"
+export NO_PROXY=localhost,127.0.0.1,0.0.0.0 no_proxy=localhost,127.0.0.1,0.0.0.0
+export HF_HUB_OFFLINE=${HF_HUB_OFFLINE:-1} TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-4}"   # single GPU
 
-STUDENT_MODEL_PATH="${STUDENT_MODEL_PATH:-${MODEL_DIR}/Qwen3-1.7B-Base}"
-# TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-${MODEL_DIR}/Qwen3-4B}"
-TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-${MODEL_DIR}/Phi-4-mini-reasoning}"
+STUDENT_MODEL_PATH="${STUDENT_MODEL_PATH:-/mnt/lxy/hf_models/Qwen3-0.6B}"
+TEACHER_MODEL_PATH="${TEACHER_MODEL_PATH:-/mnt/lxy/hf_models/Qwen3-4B}"
 RESPONSES_JSONL="${RESPONSES_JSONL:-${REPO_ROOT}/outputs/cross_arch_preexp1/on_policy_pairs.jsonl}"
 OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/bridge_construction}"
-SUBSPACE_MODE="${SUBSPACE_MODE:-full}"
-POSITION_MODE="${POSITION_MODE:-last_k}"
-LAST_K="${LAST_K:-20000}" #2000
-FIRST_K="${FIRST_K:-20000}"
-BATCH_SIZE="${BATCH_SIZE:-4}"
-MAX_BATCH_TOKENS="${MAX_BATCH_TOKENS:-65536}"
-MAX_PCA_ROWS="${MAX_PCA_ROWS:-16384}"
+RANKS="${RANKS:-8}"                 # cross-arch default r=8 (must match REP_LOW_RANK in Stage 2)
+LAYER_MODE="${LAYER_MODE:-all}"     # all | last | mid  (must match REP_DISTILLATION_LAYERS)
+LAST_K="${LAST_K:-1024}"
 EPOCHS="${EPOCHS:-20}"
-EVAL_EVERY="${EVAL_EVERY:-1}"
 LR="${LR:-1e-4}"
-RANKS="${RANKS:-4}"
-LAYER_MODE="${LAYER_MODE:-all}"
-PROJECTOR="${PROJECTOR:-linear}"
-MLP_HIDDEN_MULT="${MLP_HIDDEN_MULT:-4}"
+BATCH_SIZE="${BATCH_SIZE:-2}"
+MAX_BATCH_TOKENS="${MAX_BATCH_TOKENS:-4096}"
+EVAL_EVERY="${EVAL_EVERY:-1}"
 
 python3 "${SCRIPT_DIR}/cross_arch_preexp2_train_ps.py" \
   --responses-jsonl "${RESPONSES_JSONL}" \
   --student-model-path "${STUDENT_MODEL_PATH}" \
   --teacher-model-path "${TEACHER_MODEL_PATH}" \
   --output-dir "${OUTPUT_DIR}" \
-  --subspace-mode "${SUBSPACE_MODE}" \
-  --position-mode "${POSITION_MODE}" \
+  --ranks ${RANKS} \
+  --layer-mode "${LAYER_MODE}" \
   --last-k "${LAST_K}" \
-  --first-k "${FIRST_K}" \
+  --epochs "${EPOCHS}" \
+  --lr "${LR}" \
   --batch-size "${BATCH_SIZE}" \
   --max-batch-tokens "${MAX_BATCH_TOKENS}" \
-  --max-pca-rows "${MAX_PCA_ROWS}" \
-  --epochs "${EPOCHS}" \
-  --eval-every "${EVAL_EVERY}" \
-  --lr "${LR}" \
-  --layer-mode "${LAYER_MODE}" \
-  --projector "${PROJECTOR}" \
-  --mlp-hidden-mult "${MLP_HIDDEN_MULT}" \
-  --ranks ${RANKS} \
-  ${COMPUTE_PROBE_COSINE:+--compute-probe-cosine}
+  --eval-every "${EVAL_EVERY}"
 
-echo "Done. See ${OUTPUT_DIR}/summary.json"
-echo "  full:     rank_*/results.json (or rank_*_mlp/ for MLP)"
-echo "  direct:   rank_*_direct/direct_bank.pt"
+echo "Bridge: ${OUTPUT_DIR}/rank_${RANKS}/ps_bank.pt"
+echo "Inspect: python ${SCRIPT_DIR}/inspect_ps_bank.py ${OUTPUT_DIR}/rank_${RANKS}/ps_bank.pt"

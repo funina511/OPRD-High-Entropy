@@ -1,13 +1,25 @@
-
+# ---- OPRD / verl training artifacts (do not push) ----
+**/outputs/
+**/output/
+outputs/
+output/
+**/logs/
+logs/
+log/
+**/wandb/
+**/swanlab/
+**/swanlog/
+**/checkpoints/
 **/*.pt
-**/checkpoints
+**/*.ckpt
+**/*.safetensors
+figs/
+**/ray_results/
 **/wget-log
 **/_build/
-**/*.ckpt
-**/outputs
 **/*.tar.gz
-**/playground
-**/wandb
+**/playground/
+.history
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -117,19 +129,10 @@ ENV/
 # ckpt
 *.lock
 
-# data
+# Local datasets (parquet etc.). Currently tracked on origin — uncomment +
+# `git rm -r --cached datasets` if you want to stop shipping them.
 #*.parquet
-#datasets
-
-
-# local logs
-logs
-log
-outputs
-output
-figs/
-.history
-
+#datasets/
 
 LlamaFactory/data/
 TRL-sft/swanlog/

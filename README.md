@@ -43,7 +43,7 @@ Compared to top-*k* token OPD on long chain-of-thought responses, OPRD:
 2. **Teacher cache**: The teacher runs a forward pass; per-layer hidden states on the response region are stored.
 3. **Student update**: The student forward produces matching hidden states; the loss is **MSE** between student and teacher representations.
 
-Key knobs (see `rep_distillation.sh`):
+Key knobs (see `experiments/run_distillation.sh`):
 
 | Concept             | Env vars                                  | Options                                             |
 | ------------------- | ----------------------------------------- | --------------------------------------------------- |
@@ -113,14 +113,17 @@ export DATA_DIR=/path/to/your/datasets      # training/eval data
 
 ### Training
 
+Unified entry: `experiments/run_distillation.sh` (`oprd` | `opd` | `oprd_opd`).
+
 #### OPRD-Vanilla (same architecture, recommended)
 
 ```bash
-# Rep-only (no OPD loss)
-bash rep_distillation.sh
+# Rep-only (no OPD loss) — default
+bash experiments/run_distillation.sh
+# equivalent: bash experiments/run_distillation.sh oprd
 
 # Combined: OPD + representation
-REP_DISTILLATION_ONLY=False LOG_PROB_TOP_K=16 bash rep_distillation.sh
+bash experiments/run_distillation.sh oprd_opd
 ```
 
 #### OPRD-Bridge (cross-architecture / cross-tokenizer)
@@ -139,7 +142,7 @@ bash low_rank_rep_distillation.sh
 #### Token-level OPD only (upstream-style)
 
 ```bash
-USE_REP_DISTILLATION=False bash on_policy_distillation.sh
+bash experiments/run_distillation.sh opd
 ```
 
 #### GRPO (RL baseline, no distillation)
@@ -159,7 +162,7 @@ To compare **rep-only** vs **top-*k* OPD** actor-update peak memory:
 
 ```bash
 export ACTOR_UPDATE_MEM_PROFILE=1
-bash rep_distillation.sh   # or on_policy_distillation.sh with desired LOG_PROB_TOP_K
+bash experiments/run_distillation.sh oprd   # or: ... opd / oprd_opd
 ```
 
 Logged metrics (per step, `all_reduce(MAX)` over ranks):

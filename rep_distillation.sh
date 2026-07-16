@@ -53,7 +53,6 @@ exec bash "$SCRIPT_DIR/on_policy_distillation.sh" "$@"
 
 
 
-
 # # All layers + all response tokens
 # REP_DISTILLATION_LAYERS=all REP_DISTILLATION_POSITIONS=all bash rep_distillation.sh
 
