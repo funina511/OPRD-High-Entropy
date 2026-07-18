@@ -5,7 +5,7 @@
 #
 #   bash experiments/exp_oprd_bridge.sh
 #   REP_LOW_RANK=64 REP_LOW_RANK_INIT_CHECKPOINT=.../rank_64/ps_bank.pt bash experiments/exp_oprd_bridge.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/setup/common.sh"
 
 export REP_PROJECTOR_MODE=low_rank
 export REP_LOW_RANK=${REP_LOW_RANK:-8}                                  # MUST match the bridge's rank

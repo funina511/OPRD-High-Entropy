@@ -7,7 +7,7 @@
 #
 #   bash experiments/exp_rel_rkd.sh
 #   REP_CHUNKS=8 REP_DISTILLATION_COEF=3.0 bash experiments/exp_rel_rkd.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/setup/common.sh"
 
 export REP_PROJECTOR_MODE=full                                         # ignored by RKD (dispatch skips projector)
 export REP_ALIGN_LOSS=rkd

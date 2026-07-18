@@ -5,7 +5,7 @@
 #
 #   bash experiments/exp_oprd_opd.sh
 #   REP_DISTILLATION_COEF=0.3 MINI_BATCH_SIZE=16 bash experiments/exp_oprd_opd.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/setup/common.sh"
 
 export REP_DISTILLATION_COEF=${REP_DISTILLATION_COEF:-0.1}             # rep is AUXILIARY; OPD dominates
 export LOG_PROB_TOP_K=${LOG_PROB_TOP_K:-16}                            # token-level OPD signal

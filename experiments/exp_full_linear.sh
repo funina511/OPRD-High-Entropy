@@ -5,7 +5,7 @@
 # trained on-policy from scratch. All other knobs match exp_oprd_bridge for a clean comparison.
 #
 #   bash experiments/exp_full_linear.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/setup/common.sh"
 
 export REP_PROJECTOR_MODE=full                                         # no checkpoint, trains from scratch
 export REP_DISTILLATION_COEF=${REP_DISTILLATION_COEF:-10.0}

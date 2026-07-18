@@ -7,7 +7,7 @@
 #
 #   bash experiments/exp_rel_infonce.sh
 #   REP_INFONCE_TAU=0.1 REP_DISTILLATION_COEF=1.0 bash experiments/exp_rel_infonce.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/setup/common.sh"
 
 export REP_PROJECTOR_MODE=full                                         # trainable Linear(1024->2560)
 export REP_ALIGN_LOSS=infonce
