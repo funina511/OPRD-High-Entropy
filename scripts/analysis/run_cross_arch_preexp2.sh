@@ -14,7 +14,7 @@
 # --layer-mode even (only all|last|mid are valid) -> it crashed immediately. Fixed here.
 #
 # IMPORTANT: --ranks and --layer-mode MUST match the Stage 2 distillation knobs
-#   REP_LOW_RANK and REP_DISTILLATION_LAYERS (both default to 8 / all in run_oprd_3090.sh).
+#   REP_LOW_RANK and REP_DISTILLATION_LAYERS (both default to 8 / all in exp_oprd_bridge.sh).
 
 set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

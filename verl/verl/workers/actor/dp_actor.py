@@ -59,6 +59,8 @@ from verl.utils.rep_distillation import (
     compute_rep_alignment_metrics,
     multi_layer_normalized_cosine_similarity,
     multi_layer_normalized_mse_loss,
+    multi_layer_rkd_distance_loss,
+    multi_layer_infonce_loss,
     validate_rep_distillation_layers,
     validate_rep_distillation_positions,
     validate_rep_projector_mode,
@@ -1092,6 +1094,12 @@ class DataParallelPPOActor(BasePPOActor):
         rep_distillation_last_k = int(self.config.get("rep_distillation_last_k", 32))
         rep_distillation_first_k = int(self.config.get("rep_distillation_first_k", 50))
         multi_layer_rep = rep_distillation_layers != "last"
+        # Relational alignment losses (chunk-level, tokenizer-agnostic). Default "mse" = legacy behavior.
+        rep_align_loss = str(self.config.get("rep_align_loss", "mse")).lower()
+        if rep_align_loss not in ("mse", "rkd", "infonce"):
+            raise ValueError(f"rep_align_loss must be mse|rkd|infonce, got {rep_align_loss!r}")
+        rep_chunks = int(self.config.get("rep_chunks", 8))
+        rep_infonce_tau = float(self.config.get("rep_infonce_tau", 0.07))
 
         select_keys = [
             "responses",
@@ -1396,7 +1404,13 @@ class DataParallelPPOActor(BasePPOActor):
                             if student_dim == teacher_dim:
                                 rep_projector_mode = "full"
 
-                            if rep_projector_mode == "low_rank":
+                            if rep_align_loss == "rkd":
+                                # RKD: no projector. Relations are matched in each model's
+                                # own dim space (student 1024 / teacher 2560), so we keep
+                                # student_repr, teacher_repr un-projected.
+                                micro_batch_metrics["rep/use_low_rank_projector"] = 0.0
+                                micro_batch_metrics["rep/align_loss_rkd"] = 1.0
+                            elif rep_projector_mode == "low_rank":
                                 num_teacher_layers = teacher_repr.size(1) if multi_layer_rep else 1
                                 low_rank_layers = num_rep_layers or 1
                                 low_rank_projector = self._get_or_create_low_rank_projector(
@@ -1456,24 +1470,54 @@ class DataParallelPPOActor(BasePPOActor):
                                 micro_batch_metrics["rep/teacher_pt_initialized"] = 0.0
                                 micro_batch_metrics["rep/projector_loaded_from_checkpoint"] = 0.0
 
-                            rep_loss = multi_layer_normalized_mse_loss(
-                                student_repr,
-                                teacher_repr,
-                                position_mask=position_mask,
-                                loss_agg_mode=loss_agg_mode,
-                                num_layers=num_rep_layers,
-                            )
-                            micro_batch_metrics.update(
-                                compute_rep_alignment_metrics(
+                            if rep_align_loss == "rkd":
+                                rep_loss, rel_metrics = multi_layer_rkd_distance_loss(
+                                    student_repr,
+                                    teacher_repr,
+                                    position_mask,
+                                    rep_chunks,
+                                    num_layers=num_rep_layers,
+                                )
+                                micro_batch_metrics.update(rel_metrics)
+                                # No shared space -> subspace cosine/mse undefined for RKD.
+                            elif rep_align_loss == "infonce":
+                                rep_loss, rel_metrics = multi_layer_infonce_loss(
+                                    student_repr,
+                                    teacher_repr,
+                                    position_mask,
+                                    rep_chunks,
+                                    tau=rep_infonce_tau,
+                                    num_layers=num_rep_layers,
+                                )
+                                micro_batch_metrics.update(rel_metrics)
+                                # student_repr already projected to teacher dim -> metrics valid.
+                                micro_batch_metrics.update(
+                                    compute_rep_alignment_metrics(
+                                        student_repr, teacher_repr,
+                                        position_mask=position_mask, num_layers=num_rep_layers,
+                                    )
+                                )
+                                micro_batch_metrics["rep/norm_mse"] = micro_batch_metrics["rep/subspace_mse"]
+                                micro_batch_metrics["rep/cosine_similarity"] = micro_batch_metrics["rep/subspace_cosine"]
+                            else:
+                                rep_loss = multi_layer_normalized_mse_loss(
                                     student_repr,
                                     teacher_repr,
                                     position_mask=position_mask,
+                                    loss_agg_mode=loss_agg_mode,
                                     num_layers=num_rep_layers,
                                 )
-                            )
-                            # Backward-compatible aliases used in earlier logs.
-                            micro_batch_metrics["rep/norm_mse"] = micro_batch_metrics["rep/subspace_mse"]
-                            micro_batch_metrics["rep/cosine_similarity"] = micro_batch_metrics["rep/subspace_cosine"]
+                                micro_batch_metrics.update(
+                                    compute_rep_alignment_metrics(
+                                        student_repr,
+                                        teacher_repr,
+                                        position_mask=position_mask,
+                                        num_layers=num_rep_layers,
+                                    )
+                                )
+                                # Backward-compatible aliases used in earlier logs.
+                                micro_batch_metrics["rep/norm_mse"] = micro_batch_metrics["rep/subspace_mse"]
+                                micro_batch_metrics["rep/cosine_similarity"] = micro_batch_metrics["rep/subspace_cosine"]
                             micro_batch_metrics["actor/rep_loss"] = rep_loss.detach().item() * loss_scale_factor
                             micro_batch_metrics["actor/rep_weighted_loss"] = (
                                 rep_loss.detach().item() * rep_distillation_coef * loss_scale_factor

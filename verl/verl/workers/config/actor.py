@@ -155,6 +155,9 @@ class ActorConfig(BaseConfig):
     rep_freeze_ps: bool = False
     rep_head_rank: int = 16
     rep_head_init_checkpoint: Optional[str] = None
+    rep_align_loss: str = "mse"
+    rep_chunks: int = 8
+    rep_infonce_tau: float = 0.07
     use_att_distillation: bool = False
     att_distillation_coef: float = 1.0
     att_distillation_layers: str = "last"

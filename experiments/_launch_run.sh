@@ -16,7 +16,7 @@ export MAX_VAL_RESP_LENGTH="${MAX_VAL_RESP_LENGTH:-2048}"
 export N_RESPONSES="${N_RESPONSES:-2}"                       # fewer sequences through the teacher
 export MINI_BATCH_SIZE="${MINI_BATCH_SIZE:-8}"
 
-setsid bash experiments/run_oprd_3090.sh oprd > "$LOG" 2>&1 &
+setsid bash experiments/exp_oprd_bridge.sh > "$LOG" 2>&1 &
 PGID=$!
 echo "$PGID" > logs/oprd_run.pgid
 echo "$LOG" > logs/oprd_run.logpath

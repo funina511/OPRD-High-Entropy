@@ -546,6 +546,139 @@ def multi_layer_normalized_cosine_similarity(
     return normalized_cosine_similarity(student_repr, teacher_repr, position_mask=position_mask)
 
 
+def chunk_pool_single_layer(
+    repr: torch.Tensor,
+    position_mask: torch.Tensor | None,
+    num_chunks: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pool one layer's per-token repr into <=num_chunks contiguous chunk vectors per row.
+
+    repr: (B, S, D); position_mask: (B, S) or None (all valid).
+    Returns (chunk_vecs (N, D), resp_ids (N,)) where N = sum_b min(T_b, num_chunks).
+    A collapsed row (few valid tokens T_b) yields only T_b chunks -> extra collapse signal.
+    """
+    B, S, D = repr.shape
+    if position_mask is None:
+        position_mask = repr.new_ones(B, S)
+    vecs: list[torch.Tensor] = []
+    ids: list[int] = []
+    for b in range(B):
+        valid = torch.nonzero(position_mask[b] > 0, as_tuple=False).flatten()
+        T = int(valid.numel())
+        if T == 0:
+            continue
+        n = min(num_chunks, T)
+        # tensor_split guarantees exactly n parts when n <= T (torch.chunk can under-split).
+        for grp in torch.tensor_split(valid, n):
+            vecs.append(repr[b].index_select(0, grp).float().mean(dim=0))
+            ids.append(b)
+    if not vecs:
+        return repr.new_zeros(0, D), repr.new_zeros(0, dtype=torch.long)
+    return torch.stack(vecs, dim=0), torch.tensor(ids, device=repr.device, dtype=torch.long)
+
+
+def rkd_distance_loss(
+    s_chunks: torch.Tensor,
+    t_chunks: torch.Tensor,
+    resp_ids: torch.Tensor,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Relational KD (distance). Match mean-normalized pairwise distance matrices.
+
+    No projector: s_chunks (N, d_s) and t_chunks (N, d_t) live in their own spaces.
+    Teacher detached. Off-diagonal only. Logs within-response vs cross-response split.
+    """
+    N = s_chunks.size(0)
+    if N < 2:
+        z = s_chunks.sum() * 0.0
+        return z, {"rep/rkd_within": 0.0, "rep/rkd_cross": 0.0, "rep/rkd_n_items": float(N)}
+    D_s = torch.cdist(s_chunks.float(), s_chunks.float())
+    D_t = torch.cdist(t_chunks.float().detach(), t_chunks.float().detach())
+    eye = torch.eye(N, dtype=torch.bool, device=s_chunks.device)
+    off = ~eye
+    D_s = D_s / D_s[off].mean().clamp_min(1e-8)
+    D_t = D_t / D_t[off].mean().clamp_min(1e-8)
+    same = (resp_ids[:, None] == resp_ids[None, :]) & off
+    cross = off & ~same
+    def _hub(m):
+        if m.sum() == 0:
+            return D_s.sum() * 0.0
+        return F.smooth_l1_loss(D_s[m], D_t[m])
+    l_within, l_cross = _hub(same), _hub(cross)
+    loss = l_within + l_cross
+    return loss, {
+        "rep/rkd_within": float(l_within.detach().item()),
+        "rep/rkd_cross": float(l_cross.detach().item()),
+        "rep/rkd_n_items": float(N),
+    }
+
+
+def infonce_loss(
+    z_s: torch.Tensor,
+    t_chunks: torch.Tensor,
+    tau: float = 0.07,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """InfoNCE, student->teacher. z_s already projected to teacher dim (N, d_t).
+
+    Positive = own chunk (diagonal); negatives = all other chunks in batch. Teacher detached.
+    """
+    N = z_s.size(0)
+    if N < 2:
+        return z_s.sum() * 0.0, {"rep/nce_acc": 0.0, "rep/nce_n_items": float(N)}
+    zs = F.normalize(z_s.float(), dim=-1)
+    zt = F.normalize(t_chunks.float().detach(), dim=-1)
+    logits = zs @ zt.T / tau
+    labels = torch.arange(N, device=z_s.device)
+    loss = F.cross_entropy(logits, labels)
+    acc = (logits.argmax(dim=-1) == labels).float().mean()
+    return loss, {"rep/nce_acc": float(acc.detach().item()), "rep/nce_n_items": float(N)}
+
+
+def _iter_layers(student_repr, teacher_repr, num_layers):
+    """Yield (s_layer (B,S,D), t_layer (B,S,D)) per aligned layer, or the single-layer pair."""
+    if num_layers is not None and num_layers > 1 and student_repr.dim() == 4 and teacher_repr.dim() == 4:
+        student_repr, teacher_repr = align_teacher_layers_to_student(student_repr, teacher_repr)
+        for li in range(student_repr.size(1)):
+            yield student_repr[:, li], teacher_repr[:, li]
+    else:
+        yield student_repr, teacher_repr
+
+
+def multi_layer_rkd_distance_loss(
+    student_repr, teacher_repr, position_mask, num_chunks, num_layers=None,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """RKD-D averaged over layers. student/teacher in their own dims (no projector)."""
+    losses, agg = [], {}
+    for s_l, t_l in _iter_layers(student_repr, teacher_repr, num_layers):
+        s_c, ids = chunk_pool_single_layer(s_l, position_mask, num_chunks)
+        t_c, _ = chunk_pool_single_layer(t_l, position_mask, num_chunks)
+        loss, m = rkd_distance_loss(s_c, t_c, ids)
+        losses.append(loss)
+        for k, v in m.items():
+            agg[k] = agg.get(k, 0.0) + v
+    n = max(len(losses), 1)
+    for k in agg:
+        agg[k] /= n
+    return torch.stack(losses).mean(), agg
+
+
+def multi_layer_infonce_loss(
+    student_proj, teacher_repr, position_mask, num_chunks, tau=0.07, num_layers=None,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """InfoNCE averaged over layers. student_proj already in teacher dim (B,[L,]S,d_t)."""
+    losses, agg = [], {}
+    for s_l, t_l in _iter_layers(student_proj, teacher_repr, num_layers):
+        s_c, _ = chunk_pool_single_layer(s_l, position_mask, num_chunks)
+        t_c, _ = chunk_pool_single_layer(t_l, position_mask, num_chunks)
+        loss, m = infonce_loss(s_c, t_c, tau=tau)
+        losses.append(loss)
+        for k, v in m.items():
+            agg[k] = agg.get(k, 0.0) + v
+    n = max(len(losses), 1)
+    for k in agg:
+        agg[k] /= n
+    return torch.stack(losses).mean(), agg
+
+
 def _masked_tensor_mean(tensor: torch.Tensor, position_mask: torch.Tensor | None) -> torch.Tensor:
     if position_mask is None:
         return tensor.mean()

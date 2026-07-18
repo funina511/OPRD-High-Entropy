@@ -62,7 +62,7 @@ echo ">>> Bridge ready: $BANK"
 python "${AN}/inspect_ps_bank.py" "$BANK" 2>/dev/null | grep -iE "rank|num layer_pairs" || true
 
 # ================== STAGE 2: rep-only distillation with frozen rank-R bridge ==================
-# Reuses run_oprd_3090.sh; overrides ONLY rank + bridge path + student model + GPUs.
+# Reuses exp_oprd_bridge.sh; overrides ONLY rank + bridge path + student model + GPUs.
 # All rep/RL knobs (coef=10, layers=all, freeze_ps=True, positions=last_k, steps=150,
 # test_freq=25, save_freq=50, n=2, mbs=8) inherit the base-run defaults unchanged.
 echo ">>> Stage 2: rep-only distillation (rank=${RANK}) on GPUs ${GPUS} ..."
@@ -82,8 +82,8 @@ REP_DISTILLATION_COEF=10.0 \
 REP_DISTILLATION_LAYERS=all \
 REP_DISTILLATION_POSITIONS=last_k \
 REP_DISTILLATION_LAST_K=1024 \
-EXPERIMENT_TAG="rank${RANK}_ablation" \
-  bash "${REPO_ROOT}/experiments/run_oprd_3090.sh" 2>&1 | tee "${LOG}"
+EXPERIMENT_NAME="rank${RANK}_ablation_$(date +%Y-%m-%d_%H-%M-%S)" \
+  bash "${REPO_ROOT}/experiments/exp_oprd_bridge.sh" 2>&1 | tee "${LOG}"
 
 echo "=================================================================="
 echo " DONE rank=${RANK}. Stage2 log: ${LOG}"

@@ -6,12 +6,19 @@ data **DAPO-Math-5k**, eval **AMC23**. Env is the `verl` conda env (Python 3.12)
 
 ## TL;DR — which script for what
 
+Every experiment is one thin `exp_*.sh` file: it `source`s `lib/common.sh` (all shared
+env — conda, proxy, paths, batch, schedule), sets only the few knobs it differs on, then
+calls `run_experiment <method>`. Experiments never call each other. To add one, copy an
+`exp_*.sh`, change its knobs, done.
+
 | Script | Method | Notes |
 | --- | --- | --- |
-| `run_distillation.sh {oprd\|opd\|oprd_opd}` | unified driver | low-level entry; all knobs are env-overridable |
-| `run_oprd_opd_3090.sh` | **OPD + rep** (combined) | token-OPD anchors output, rep is a small aux (coef 0.1). Stable; good first result. |
-| `run_oprd_3090.sh` | **cross-arch OPRD-Bridge** | rep-only in a frozen low-rank subspace. **Requires the bridge built first** (below). |
-| `run_stage01_bridge.sh` | bridge prerequisites | builds + freezes the bridge (Stage 0 + Stage 1) that `run_oprd_3090.sh` needs |
+| `run_distillation.sh {oprd\|opd\|oprd_opd}` | **core engine** | the only caller of `main_ppo`; all knobs env-overridable. Don't run directly — use an `exp_*.sh`. |
+| `lib/common.sh` | shared base | sourced by every `exp_*.sh`; defines env + the `run_experiment` helper |
+| `exp_oprd_opd.sh` | **OPD + rep** (combined) | token-OPD anchors output, rep is a small aux (coef 0.1). Stable; good first result. |
+| `exp_oprd_bridge.sh` | **cross-arch OPRD-Bridge** | rep-only in a frozen low-rank subspace. **Requires the bridge built first** (below). |
+| `exp_full_linear.sh` | **full-linear ablation** | no PCA; one trainable Linear(1024→2560) + normalized MSE. Compare vs the bridge. |
+| `build_bridge.sh` | bridge prerequisites | builds + freezes the bridge (Stage 0 + Stage 1) that `exp_oprd_bridge.sh` needs |
 
 > Same-architecture **OPRD-Vanilla** (naive `full` projector) does **not** apply to a 4B→0.6B pair:
 > the projector never aligns (cosine ≈ 0) and rep-only collapses (repetition, AMC23 → 0). Cross-arch
@@ -19,7 +26,7 @@ data **DAPO-Math-5k**, eval **AMC23**. Env is the `verl` conda env (Python 3.12)
 
 ## Why cross-arch needs the two-stage bridge
 
-`run_oprd_3090.sh` (Stage 2) aligns student↔teacher hidden states inside a shared **rank-8**
+`exp_oprd_bridge.sh` (Stage 2) aligns student↔teacher hidden states inside a shared **rank-8**
 subspace defined by a **frozen** bridge `(P_T, P_S)`:
 
 - `P_T` — teacher PCA bases (top-8 principal directions per layer). Fixed.
@@ -31,14 +38,14 @@ becoming teacher-like. Freezing removes that shortcut. Build the frozen bridge f
 
 ```bash
 # One command (Stage 0 -> Stage 1), single GPU, idempotent:
-bash experiments/run_stage01_bridge.sh
+bash experiments/build_bridge.sh
 # -> outputs/bridge_construction/rank_8/ps_bank.pt
 ```
 
 Then run the distillation:
 
 ```bash
-bash experiments/run_oprd_3090.sh          # reads the rank_8 bridge, REP_FREEZE_PS=True
+bash experiments/exp_oprd_bridge.sh          # reads the rank_8 bridge, REP_FREEZE_PS=True
 ```
 
 ### The two stages in detail
@@ -90,4 +97,4 @@ These are handled automatically; listed so they're not re-discovered the hard wa
 | rep-only, `full` projector (vanilla) | cosine ~0; collapse to repetition, acc 0.28 → 0 by step 50 |
 | `oprd_opd` (OPD + rep 0.1) | stable, acc 0.28 → 0.30 → 0.33 (step 0/50/75) |
 | Bridge, **trainable** P_S (on-the-fly) | cosine 0.17 → 0.97 **but** acc → 0.037 (rubber-ruler) |
-| Bridge, **frozen** P_S (this pipeline) | see current `run_oprd_3090.sh` run |
+| Bridge, **frozen** P_S (this pipeline) | see current `exp_oprd_bridge.sh` run |

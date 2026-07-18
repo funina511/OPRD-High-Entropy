@@ -1,13 +1,13 @@
 #!/bin/bash
 # OPRD-Bridge prerequisites: build the FROZEN cross-arch bridge (Stage 0 + Stage 1) that
-# experiments/run_oprd_3090.sh (Stage 2) consumes. Single GPU. Idempotent: skips a stage
+# experiments/exp_oprd_bridge.sh (Stage 2) consumes. Single GPU. Idempotent: skips a stage
 # whose output already exists (set FORCE=1 to rebuild).
 #
-#   bash experiments/run_stage01_bridge.sh            # 4B -> 0.6B, rank 8, all layers
-#   RANKS=4 LAYER_MODE=mid bash experiments/run_stage01_bridge.sh
+#   bash experiments/build_bridge.sh            # 4B -> 0.6B, rank 8, all layers
+#   RANKS=4 LAYER_MODE=mid bash experiments/build_bridge.sh
 #
 # Output: outputs/bridge_construction/rank_${RANKS}/ps_bank.pt
-# Then run Stage 2:  REP_LOW_RANK=${RANKS} bash experiments/run_oprd_3090.sh
+# Then run Stage 2:  REP_LOW_RANK=${RANKS} bash experiments/exp_oprd_bridge.sh
 set -eo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AN="${REPO_ROOT}/scripts/analysis"
@@ -36,4 +36,4 @@ fi
 echo "==================== BRIDGE READY ===================="
 echo "  $BANK"
 python "${AN}/inspect_ps_bank.py" "$BANK" 2>/dev/null | grep -iE "rank|num layer_pairs|Key format" || true
-echo "Next:  REP_LOW_RANK=${RANKS} REP_DISTILLATION_LAYERS=${LAYER_MODE} bash experiments/run_oprd_3090.sh"
+echo "Next:  REP_LOW_RANK=${RANKS} REP_DISTILLATION_LAYERS=${LAYER_MODE} bash experiments/exp_oprd_bridge.sh"
