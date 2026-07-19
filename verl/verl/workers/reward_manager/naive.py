@@ -163,9 +163,10 @@ class NaiveRewardManager(AbstractRewardManager):
         # Do not attach format_mask here — hard-masking would zero PG on garbage and
         # prevent learning from negative advantages on non-boxed samples.
         if return_dict:
-            reward_extra_info["true_reward_score"] = reward_tensor
+            # Per-sample Python lists so validation dump / metrics can JSON-serialize.
+            reward_extra_info["true_reward_score"] = reward_tensor.sum(dim=-1).detach().cpu().tolist()
             if self.enable_format_reward:
-                reward_extra_info["format_score_raw"] = format_tensor
+                reward_extra_info["format_score_raw"] = format_tensor.detach().cpu().tolist()
             return {
                 "reward_tensor": reward_tensor,
                 "reward_extra_info": reward_extra_info,

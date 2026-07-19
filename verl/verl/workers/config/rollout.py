@@ -143,6 +143,9 @@ class RolloutConfig(BaseConfig):
     top_k_strategy: str = "only_stu"  # "only_stu", "only_tch", "intersection", or "union"
     reward_weight_mode: str = "student_p"  # "student_p", "teacher_p", or "none"
     teacher_temperature: float = 1.0  # Temperature for teacher logits (default 1.0, no scaling)
+    # If False with OPRD: teacher still provides hidden for RKD, but skip reverse-KL
+    # rm_scores so student outcome/format RL drives the policy head.
+    use_token_kl_reward: bool = True
 
     disable_log_stats: bool = True
 

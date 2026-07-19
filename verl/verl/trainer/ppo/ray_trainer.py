@@ -443,6 +443,15 @@ class RayPPOTrainer:
         os.makedirs(dump_path, exist_ok=True)
         filename = os.path.join(dump_path, f"{self.global_steps}.jsonl")
 
+        def _to_jsonable(x):
+            if torch.is_tensor(x):
+                return x.detach().cpu().tolist()
+            if isinstance(x, np.ndarray):
+                return x.tolist()
+            if isinstance(x, (np.floating, np.integer)):
+                return x.item()
+            return x
+
         n = len(inputs)
         base_data = {
             "input": inputs,
@@ -458,7 +467,7 @@ class RayPPOTrainer:
 
         lines = []
         for i in range(n):
-            entry = {k: v[i] for k, v in base_data.items()}
+            entry = {k: _to_jsonable(v[i]) for k, v in base_data.items()}
             lines.append(json.dumps(entry, ensure_ascii=False))
 
         with open(filename, "w") as f:
