@@ -6,15 +6,42 @@ data **DAPO-Math-5k**, eval **AMC23**. Env is the `verl` conda env (Python 3.12)
 
 ## TL;DR — which script for what
 
-Every experiment is one thin `exp_*.sh` file: it `source`s `lib/common.sh` (all shared
-env — conda, proxy, paths, batch, schedule), sets only the few knobs it differs on, then
-calls `run_experiment <method>`. Experiments never call each other. To add one, copy an
+Every experiment is one thin `exp_*.sh` file: it `source`s `setup/common.sh` (all shared
+env — conda, batch, schedule), sets only the few knobs it differs on, then calls
+`run_experiment <method>`. Experiments never call each other. To add one, copy an
 `exp_*.sh`, change its knobs, done.
+
+### Single source of truth + per-host profiles (read this before editing)
+
+There is **one** `experiments/` dir, shared across machines via git. The ML logic
+(`run_distillation.sh` + the `exp_*.sh` knobs) is identical everywhere — edit it once,
+`git pull` on the other box, done. **Machine-specific** values (conda path, model/data
+dirs, CUDA devices, proxy, ray tuning) live only in `setup/hosts/<host>.sh`:
+
+- `common.sh` picks the profile by `$OPRD_HOST`, else `hostname`. `good3090` resolves by
+  hostname automatically. The `siton141` container has an ephemeral hostname (a docker id),
+  so it sets `export OPRD_HOST=siton141` in its shell rc.
+- **Adding a machine:** `cp setup/hosts/_template.sh setup/hosts/<name>.sh` and fill it in
+  (the template lists every required var; copy `good3090.sh` / `siton141.sh` instead if one
+  is closer to your box). If the hostname is stable it auto-selects; if it's a container id,
+  `export OPRD_HOST=<name>` in that box's rc. Never put a host path in `run_distillation.sh`
+  or an `exp_*.sh`.
+- **Fail-fast on incomplete profiles:** after sourcing the host file, `common.sh` asserts the
+  required vars (`OPRD_CONDA_SH/ENV/BIN`, `CUDA_VISIBLE_DEVICES`, `N_GPUS_PER_NODE`,
+  `OPRD_REPO_ROOT`, `MODEL_DIR`, `DATA_DIR`) are non-empty and errors naming any that are
+  missing — so a half-filled profile can't silently degrade `PATH`/paths.
+
+**Anti-drift guard:** `run_distillation.sh` runs `setup/check_plumbing.sh` at startup — it
+fails fast if any exported knob has no matching hydra override (the silent no-op bug where a
+var is set + baked into the run name but never reaches the trainer). Skip with
+`SKIP_PLUMBING_CHECK=1` while iterating on the script itself.
 
 | Script | Method | Notes |
 | --- | --- | --- |
 | `run_distillation.sh {oprd\|opd\|oprd_opd}` | **core engine** | the only caller of `main_ppo`; all knobs env-overridable. Don't run directly — use an `exp_*.sh`. |
-| `lib/common.sh` | shared base | sourced by every `exp_*.sh`; defines env + the `run_experiment` helper |
+| `setup/common.sh` | shared base | sourced by every `exp_*.sh`; selects host profile, defines env + the `run_experiment` helper |
+| `setup/hosts/<host>.sh` | per-machine | the ONLY place host paths/CUDA/proxy/ray-tuning live |
+| `setup/check_plumbing.sh` | anti-drift guard | asserts every exported knob reaches the trainer; auto-run at startup |
 | `exp_oprd_opd.sh` | **OPD + rep** (combined) | token-OPD anchors output, rep is a small aux (coef 0.1). Stable; good first result. |
 | `exp_oprd_bridge.sh` | **cross-arch OPRD-Bridge** | rep-only in a frozen low-rank subspace. **Requires the bridge built first** (below). |
 | `exp_full_linear.sh` | **full-linear ablation** | no PCA; one trainable Linear(1024→2560) + normalized MSE. Compare vs the bridge. |
@@ -73,16 +100,18 @@ saves `outputs/bridge_construction/rank_${RANKS}/ps_bank.pt`. Inspect with
 These are handled automatically; listed so they're not re-discovered the hard way.
 
 1. **PATH shadowing** — the shell profile puts another conda env ahead of `verl` on PATH, so
-   `conda activate verl` alone leaves `python`/`ray`/`pip` pointing elsewhere. Every script forces
-   `export PATH=/mnt/lxy/miniconda3/envs/verl/bin:$PATH`.
-2. **Clash proxy** — `http_proxy=127.0.0.1:7890` hijacks localhost and breaks Ray/vLLM. Scripts set
-   `NO_PROXY` (incl. `wandb.ai`) and models load offline (`HF_HUB_OFFLINE=1`).
+   `conda activate verl` alone leaves `python`/`ray`/`pip` pointing elsewhere. `common.sh` forces
+   `export PATH=$OPRD_CONDA_BIN:$PATH` (the bin dir comes from the host profile).
+2. **Proxy** — host-dependent, set in the host profile. `good3090` runs direct with `wandb.ai` in
+   `NO_PROXY`; `siton141` must route wandb *through* its clash `HTTP(S)_PROXY` (direct GraphQL times
+   out there) and unsets socks `ALL_PROXY` (makes wandb-core hang). Models load offline everywhere
+   (`HF_HUB_OFFLINE=1`).
 3. **vLLM fork crash (Stage 0)** — `VLLM_WORKER_MULTIPROC_METHOD=spawn`, else the v1 engine core dies
    with "Cannot re-initialize CUDA in forked subprocess".
 4. **`expandable_segments` (Stage 1 only)** — set to reduce fragmentation OOM. Do **not** set it for
    anything running vLLM (Stage 0 / Stage 2); vLLM's memory pool asserts against it.
-5. **GPU 0 is shared** with another user → scripts default to `CUDA_VISIBLE_DEVICES=4,5,6,7`
-   (Stage 0/1 use a single card, default 4).
+5. **GPU visibility** is per-host (`CUDA_VISIBLE_DEVICES` in the host profile): `good3090` defaults
+   to `4,5,6,7` (GPU 0 shared with another user), `siton141` to `0`.
 6. **`IS_PLOT=False`** in Stage 2 — the `is_plot` viz block calls `swanlab.log` without initializing
    swanlab (only when `log_prob_top_k>0`), which throws harmlessly every 10 steps. Turned off.
 

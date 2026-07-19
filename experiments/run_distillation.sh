@@ -26,6 +26,12 @@ set -x
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+# Anti-drift guard: fail fast if any exported knob has no hydra override (silent no-op).
+# Skip with SKIP_PLUMBING_CHECK=1 (e.g. while iterating on the script itself).
+if [ "${SKIP_PLUMBING_CHECK:-0}" != "1" ]; then
+    bash "$(dirname "${BASH_SOURCE[0]}")/setup/check_plumbing.sh" "${BASH_SOURCE[0]}" || exit 1
+fi
+
 # ---------------------------------------------------------------------------
 # Method preset: oprd | opd | oprd_opd
 # ---------------------------------------------------------------------------
@@ -69,6 +75,8 @@ export REP_CHUNKS=${REP_CHUNKS:-8}
 export REP_INFONCE_TAU=${REP_INFONCE_TAU:-0.07}
 # Mask same-response chunks out of each InfoNCE anchor's negatives (poison-negative fix)
 export REP_INFONCE_MASK_WITHIN=${REP_INFONCE_MASK_WITHIN:-False}
+# RKD-A (within-response angle) weight vs RKD-D; 0 = distance-only
+export REP_RKD_ANGLE_COEF=${REP_RKD_ANGLE_COEF:-0.0}
 
 export USE_ATT_DISTILLATION=${USE_ATT_DISTILLATION:-False}
 export ATT_DISTILLATION_COEF=${ATT_DISTILLATION_COEF:-1.0}
@@ -100,6 +108,12 @@ fi
 # Set SKIP_RAY_STOP=1 for concurrent runs (each job then owns an isolated RAY_PORT + temp-dir).
 if [ "${SKIP_RAY_STOP:-0}" != "1" ]; then
     ray stop --force || true
+    # Some hosts leave zombie gcs_server/raylet + stale temp-dir behind (RAY_ZOMBIE_SWEEP=1).
+    if [ "${RAY_ZOMBIE_SWEEP:-0}" = "1" ]; then
+        pkill -9 -f "ray/.*/gcs_server.*--gcs_server_port=${RAY_PORT:-6379}" 2>/dev/null || true
+        pkill -9 -f "temp-dir=/tmp/ray_${RAY_PORT:-6379}" 2>/dev/null || true
+        rm -rf "${RAY_TEMP_DIR:-/tmp/ray_${RAY_PORT:-6379}}"
+    fi
 fi
 export RAY_memory_usage_threshold=0.99
 export CUDA_LAUNCH_BLOCKING=${CUDA_LAUNCH_BLOCKING:-0}
@@ -131,6 +145,11 @@ export TOP_K_STRATEGY=${TOP_K_STRATEGY:-only_stu}
 export REWARD_WEIGHT_MODE=${REWARD_WEIGHT_MODE:-student_p}
 export USE_KL=${USE_KL:-False}
 export ENABLE_FORMAT_REWARD=${ENABLE_FORMAT_REWARD:-False}
+# Soft \boxed bonus on outcome reward when ENABLE_FORMAT_REWARD=True and no rm_scores.
+export FORMAT_REWARD_COEF=${FORMAT_REWARD_COEF:-0.1}
+# When False with OPRD: teacher still supplies hidden for RKD, but policy reward is
+# student outcome/format only (skip reverse-KL token reward / OPD).
+export USE_TOKEN_KL_REWARD=${USE_TOKEN_KL_REWARD:-True}
 export MODEL_DTYPE=${MODEL_DTYPE:-bfloat16}
 export IS_PLOT=${IS_PLOT:-True}
 export LOSS_AGG_MODE=${LOSS_AGG_MODE:-token-mean}
@@ -157,14 +176,18 @@ export TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-100}
 export SAVE_FREQ=${SAVE_FREQ:-200}
 export TEST_FREQ=${TEST_FREQ:-500}
 
-export CKPT_PATH=${CKPT_PATH:-${PROJECT_PATH}/${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}-$(date +%Y-%m-%d_%H-%M-%S)-${METHOD}}
+# Resolve wandb/experiment name first, then derive ckpt dir from it so they stay identical.
 export EXPERIMENT_NAME=${EXPERIMENT_NAME:-${ADV_ESTIMATOR}_${TRAIN_DATASET_NAME}_${ACTOR_MODEL_NAME}_${REWARD_MODEL_NAME}_${MAX_RESP_LENGTH}-T_${TEMPERATURE}-Tch_${TEACHER_TEMPERATURE}-n_${N_RESPONSES}-mbs_${MINI_BATCH_SIZE}-topk_${LOG_PROB_TOP_K}-topk_strategy_${TOP_K_STRATEGY}-rw_${REWARD_WEIGHT_MODE}-$(date +%Y-%m-%d_%H-%M-%S)-${METHOD}}
+export CKPT_PATH=${CKPT_PATH:-${PROJECT_PATH}/${EXPERIMENT_NAME}}
 export OUTLINES_CACHE_DIR=${OUTLINES_CACHE_DIR:-~/.cache/outlines/$(uuidgen)}
 export SWANLAB_LOG_DIR=${SWANLAB_LOG_DIR:-${PROJECT_PATH}/swanlab_log}
 
 mkdir -p "$PROJECT_PATH/logs/terminal" "$PROJECT_PATH/logs/validation_log"
 
 echo "METHOD=$METHOD USE_REP=$USE_REP_DISTILLATION REP_ONLY=$REP_DISTILLATION_ONLY TOP_K=$LOG_PROB_TOP_K"
+echo "ADV=$ADV_ESTIMATOR TOKEN_KL_REWARD=$USE_TOKEN_KL_REWARD FORMAT_REWARD=$ENABLE_FORMAT_REWARD FORMAT_COEF=$FORMAT_REWARD_COEF"
+echo "experiment=$EXPERIMENT_NAME"
+echo "ckpt=$CKPT_PATH"
 echo "student=$ACTOR_MODEL_PATH teacher=$REWARD_MODEL_PATH"
 echo "train=$TRAIN_DATASET"
 
@@ -191,7 +214,13 @@ export RAY_PORT=${RAY_PORT:-6391}
 # address. Without this, two jobs both `ray start --head --port=6391` collide on the
 # default /tmp/ray session and the second one SIGKILLs the first's raylet.
 export RAY_TEMP_DIR=${RAY_TEMP_DIR:-/tmp/ray_${RAY_PORT}}
-ray start --head --port="$RAY_PORT" --temp-dir="$RAY_TEMP_DIR"
+mkdir -p "$RAY_TEMP_DIR"
+# Optional caps (host file sets these): default prestart workers (== num CPUs) + huge
+# shm can trigger intermittent ENOMEM under vm.overcommit_memory=0 during ray.init.
+RAY_START_EXTRA=()
+[ -n "${RAY_OBJECT_STORE_MEMORY:-}" ] && RAY_START_EXTRA+=(--object-store-memory="$RAY_OBJECT_STORE_MEMORY")
+[ -n "${RAY_NUM_CPUS:-}" ] && RAY_START_EXTRA+=(--num-cpus="$RAY_NUM_CPUS")
+ray start --head --port="$RAY_PORT" --temp-dir="$RAY_TEMP_DIR" "${RAY_START_EXTRA[@]}"
 export RAY_ADDRESS="127.0.0.1:${RAY_PORT}"
 sleep 5
 
@@ -234,6 +263,7 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.actor.rep_chunks=${REP_CHUNKS} \
     +actor_rollout_ref.actor.rep_infonce_tau=${REP_INFONCE_TAU} \
     +actor_rollout_ref.actor.rep_infonce_mask_within=${REP_INFONCE_MASK_WITHIN} \
+    +actor_rollout_ref.actor.rep_rkd_angle_coef=${REP_RKD_ANGLE_COEF:-0.0} \
     ${REP_LOW_RANK_INIT_CHECKPOINT:++actor_rollout_ref.actor.rep_low_rank_init_checkpoint="$REP_LOW_RANK_INIT_CHECKPOINT"} \
     +actor_rollout_ref.actor.rep_ps_projector=${REP_PS_PROJECTOR:-auto} \
     +actor_rollout_ref.actor.rep_mlp_hidden_mult=${REP_MLP_HIDDEN_MULT:-4} \
@@ -249,8 +279,8 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.actor.att_distillation_max_key_len=$ATT_DISTILLATION_MAX_KEY_LEN \
     +actor_rollout_ref.actor.att_distillation_loss=$ATT_DISTILLATION_LOSS \
     +actor_rollout_ref.actor.att_distillation_temperature=$ATT_DISTILLATION_TEMPERATURE \
-    actor_rollout_ref.actor.fsdp_config.param_offload=False \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
+    actor_rollout_ref.actor.fsdp_config.param_offload=${ACTOR_PARAM_OFFLOAD:-False} \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=${ACTOR_OPTIMIZER_OFFLOAD:-False} \
     actor_rollout_ref.actor.fsdp_config.forward_prefetch=True \
     actor_rollout_ref.actor.fsdp_config.model_dtype=$MODEL_DTYPE \
     actor_rollout_ref.rollout.max_num_batched_tokens=$PPO_MAX_TOKEN_LEN_PER_GPU \
@@ -264,6 +294,7 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.rollout.top_k_strategy=$TOP_K_STRATEGY \
     +actor_rollout_ref.rollout.reward_weight_mode=$REWARD_WEIGHT_MODE \
     +actor_rollout_ref.rollout.teacher_temperature=$TEACHER_TEMPERATURE \
+    +actor_rollout_ref.rollout.use_token_kl_reward=${USE_TOKEN_KL_REWARD:-True} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$PARALLEL_SIZE \
     actor_rollout_ref.rollout.gpu_memory_utilization=${GPU_MEM_UTIL:-0.8} \
     actor_rollout_ref.rollout.max_model_len=$MAX_MODEL_LEN \
@@ -278,6 +309,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     reward_model.enable=True \
     +reward_model.reward_kwargs.enable_format_reward=$ENABLE_FORMAT_REWARD \
+    +reward_model.reward_kwargs.format_reward_coef=$FORMAT_REWARD_COEF \
     reward_model.model.path=$REWARD_MODEL_PATH \
     reward_model.model.input_tokenizer=null \
     reward_model.model.use_remove_padding=True \

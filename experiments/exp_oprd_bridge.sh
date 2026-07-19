@@ -9,7 +9,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/setup/common.sh"
 
 export REP_PROJECTOR_MODE=low_rank
 export REP_LOW_RANK=${REP_LOW_RANK:-8}                                  # MUST match the bridge's rank
-export REP_LOW_RANK_INIT_CHECKPOINT=${REP_LOW_RANK_INIT_CHECKPOINT:-/mnt/lxy/OPRD-High-Entropy/outputs/bridge_construction_base/rank_8/ps_bank.pt}
+export REP_LOW_RANK_INIT_CHECKPOINT=${REP_LOW_RANK_INIT_CHECKPOINT:-${OPRD_REPO_ROOT}/outputs/bridge_construction_base/rank_8/ps_bank.pt}
 export REP_FREEZE_PS=${REP_FREEZE_PS:-True}                             # freeze the offline bridge
 export REP_DISTILLATION_COEF=${REP_DISTILLATION_COEF:-10.0}
 export REP_DISTILLATION_LAYERS=${REP_DISTILLATION_LAYERS:-all}          # MUST match the bridge's --layer-mode
