@@ -612,6 +612,43 @@ def rkd_distance_loss(
     }
 
 
+def _rkd_angle_on_points(s: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    """Park et al. RKD-A on a single set of points (K, D_s) / (K, D_t). Requires K >= 3."""
+    # (1,K,D) - (K,1,D) -> (K,K,D) pairwise difference vectors, then cosine of angles.
+    td = t.float().detach().unsqueeze(0) - t.float().detach().unsqueeze(1)
+    sd = s.float().unsqueeze(0) - s.float().unsqueeze(1)
+    t_angle = torch.bmm(F.normalize(td, p=2, dim=2), F.normalize(td, p=2, dim=2).transpose(1, 2)).reshape(-1)
+    s_angle = torch.bmm(F.normalize(sd, p=2, dim=2), F.normalize(sd, p=2, dim=2).transpose(1, 2)).reshape(-1)
+    return F.smooth_l1_loss(s_angle, t_angle)
+
+
+def rkd_angle_loss_within(
+    s_chunks: torch.Tensor,
+    t_chunks: torch.Tensor,
+    resp_ids: torch.Tensor,
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """RKD-A restricted to within-response triples (cheap; K^3 per response).
+
+    Skips responses with fewer than 3 chunks. No projector; teacher detached.
+    """
+    zero = s_chunks.sum() * 0.0
+    if s_chunks.size(0) < 3:
+        return zero, {"rep/rkd_angle_within": 0.0, "rep/rkd_angle_n_resp": 0.0}
+    losses: list[torch.Tensor] = []
+    for rid in resp_ids.unique().tolist():
+        mask = resp_ids == rid
+        if int(mask.sum().item()) < 3:
+            continue
+        losses.append(_rkd_angle_on_points(s_chunks[mask], t_chunks[mask]))
+    if not losses:
+        return zero, {"rep/rkd_angle_within": 0.0, "rep/rkd_angle_n_resp": 0.0}
+    loss = torch.stack(losses).mean()
+    return loss, {
+        "rep/rkd_angle_within": float(loss.detach().item()),
+        "rep/rkd_angle_n_resp": float(len(losses)),
+    }
+
+
 def infonce_loss(
     z_s: torch.Tensor,
     t_chunks: torch.Tensor,
@@ -670,15 +707,33 @@ def _iter_layers(student_repr, teacher_repr, num_layers):
 
 
 def multi_layer_rkd_distance_loss(
-    student_repr, teacher_repr, position_mask, num_chunks, num_layers=None,
+    student_repr,
+    teacher_repr,
+    position_mask,
+    num_chunks,
+    num_layers=None,
+    angle_coef: float = 0.0,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """RKD-D averaged over layers. student/teacher in their own dims (no projector)."""
+    """RKD-D (+ optional within-response RKD-A) averaged over layers.
+
+    ``angle_coef`` scales RKD-A before adding to RKD-D (Park et al. often use 2.0).
+    student/teacher stay in their own dims (no projector).
+    """
     losses, agg = [], {}
+    angle_coef = float(angle_coef)
     for s_l, t_l in _iter_layers(student_repr, teacher_repr, num_layers):
         s_c, ids = chunk_pool_single_layer(s_l, position_mask, num_chunks)
         t_c, _ = chunk_pool_single_layer(t_l, position_mask, num_chunks)
-        loss, m = rkd_distance_loss(s_c, t_c, ids)
-        losses.append(loss)
+        d_loss, m = rkd_distance_loss(s_c, t_c, ids)
+        layer_loss = d_loss
+        m = {**m, "rep/rkd_distance": float(d_loss.detach().item())}
+        if angle_coef != 0.0:
+            a_loss, a_m = rkd_angle_loss_within(s_c, t_c, ids)
+            layer_loss = layer_loss + angle_coef * a_loss
+            m.update(a_m)
+            m["rep/rkd_angle_coef"] = angle_coef
+            m["rep/rkd_angle_weighted"] = float((angle_coef * a_loss).detach().item())
+        losses.append(layer_loss)
         for k, v in m.items():
             agg[k] = agg.get(k, 0.0) + v
     n = max(len(losses), 1)

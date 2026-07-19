@@ -159,6 +159,8 @@ class ActorConfig(BaseConfig):
     rep_chunks: int = 8
     rep_infonce_tau: float = 0.07
     rep_infonce_mask_within: bool = False
+    # RKD-A weight relative to RKD-D (0 disables). Within-response triples only.
+    rep_rkd_angle_coef: float = 0.0
     use_att_distillation: bool = False
     att_distillation_coef: float = 1.0
     att_distillation_layers: str = "last"

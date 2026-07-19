@@ -1101,6 +1101,7 @@ class DataParallelPPOActor(BasePPOActor):
         rep_chunks = int(self.config.get("rep_chunks", 8))
         rep_infonce_tau = float(self.config.get("rep_infonce_tau", 0.07))
         rep_infonce_mask_within = bool(self.config.get("rep_infonce_mask_within", False))
+        rep_rkd_angle_coef = float(self.config.get("rep_rkd_angle_coef", 0.0))
 
         select_keys = [
             "responses",
@@ -1478,6 +1479,7 @@ class DataParallelPPOActor(BasePPOActor):
                                     position_mask,
                                     rep_chunks,
                                     num_layers=num_rep_layers,
+                                    angle_coef=rep_rkd_angle_coef,
                                 )
                                 micro_batch_metrics.update(rel_metrics)
                                 # No shared space -> subspace cosine/mse undefined for RKD.
