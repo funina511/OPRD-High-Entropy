@@ -546,6 +546,63 @@ def multi_layer_normalized_cosine_similarity(
     return normalized_cosine_similarity(student_repr, teacher_repr, position_mask=position_mask)
 
 
+def compute_chunk_assignment(
+    position_mask: torch.Tensor,
+    num_chunks: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
+    """Vectorized token->chunk assignment shared by all layers / student+teacher.
+
+    Depends only on ``position_mask`` (B, S), so it is computed once and reused. Reproduces
+    ``torch.tensor_split`` boundaries exactly: with T valid tokens split into
+    n=min(num_chunks, T) parts, the first ``r=T%n`` chunks get ``ceil(T/n)`` tokens and the
+    rest get ``floor(T/n)``. Returns ``(token_pos, token_gid, resp_ids, N)`` where
+    ``token_pos`` indexes valid tokens into the flattened (B*S) rows, ``token_gid`` maps each
+    to its global chunk id in ``[0, N)``, ``resp_ids`` (N,) is each chunk's row, and
+    ``N = sum_b min(T_b, num_chunks)``.
+    """
+    B, S = position_mask.shape
+    dev = position_mask.device
+    valid = position_mask > 0
+    T = valid.sum(dim=1)                                 # (B,) valid tokens per row
+    n = torch.clamp(T, max=int(num_chunks))              # chunks per row (0 if empty)
+    n_safe = n.clamp(min=1)
+    q = torch.div(T, n_safe, rounding_mode="floor")      # floor(T/n)
+    r = T - q * n                                         # T % n
+    chunk_offset = torch.zeros(B, dtype=torch.long, device=dev)
+    if B > 1:
+        chunk_offset[1:] = torch.cumsum(n, dim=0)[:-1]   # global id base per row
+    N = int(n.sum().item())
+    j = valid.long().cumsum(dim=1) - 1                    # local rank of each valid token
+    qb, rb = q.view(B, 1), r.view(B, 1)
+    thr = rb * (qb + 1)                                   # boundary between big/small chunks
+    c_first = torch.div(j, (qb + 1).clamp(min=1), rounding_mode="floor")
+    c_rest = rb + torch.div(j - thr, qb.clamp(min=1), rounding_mode="floor")
+    chunk_local = torch.where(j < thr, c_first, c_rest)   # chunk index within row
+    gid_full = chunk_offset.view(B, 1) + chunk_local
+    fv = valid.reshape(-1)
+    token_gid = gid_full.reshape(-1)[fv].long()
+    token_pos = torch.nonzero(fv, as_tuple=False).flatten()
+    resp_ids = torch.repeat_interleave(torch.arange(B, device=dev), n)
+    return token_pos, token_gid, resp_ids, N
+
+
+def pool_by_assignment(
+    repr: torch.Tensor,
+    token_pos: torch.Tensor,
+    token_gid: torch.Tensor,
+    N: int,
+) -> torch.Tensor:
+    """Scatter-mean valid tokens of ``repr`` (B, S, D) into ``N`` chunk vectors (float32)."""
+    B, S, D = repr.shape
+    flat = repr.reshape(B * S, D).float()
+    sel = flat.index_select(0, token_pos)
+    out = flat.new_zeros(N, D).index_add(0, token_gid, sel)
+    counts = flat.new_zeros(N).index_add(
+        0, token_gid, torch.ones(token_gid.numel(), device=repr.device)
+    )
+    return out / counts.clamp_min(1.0).unsqueeze(1)
+
+
 def chunk_pool_single_layer(
     repr: torch.Tensor,
     position_mask: torch.Tensor | None,
@@ -556,25 +613,16 @@ def chunk_pool_single_layer(
     repr: (B, S, D); position_mask: (B, S) or None (all valid).
     Returns (chunk_vecs (N, D), resp_ids (N,)) where N = sum_b min(T_b, num_chunks).
     A collapsed row (few valid tokens T_b) yields only T_b chunks -> extra collapse signal.
+    Vectorized via compute_chunk_assignment + pool_by_assignment (see those for exact
+    tensor_split semantics).
     """
     B, S, D = repr.shape
     if position_mask is None:
         position_mask = repr.new_ones(B, S)
-    vecs: list[torch.Tensor] = []
-    ids: list[int] = []
-    for b in range(B):
-        valid = torch.nonzero(position_mask[b] > 0, as_tuple=False).flatten()
-        T = int(valid.numel())
-        if T == 0:
-            continue
-        n = min(num_chunks, T)
-        # tensor_split guarantees exactly n parts when n <= T (torch.chunk can under-split).
-        for grp in torch.tensor_split(valid, n):
-            vecs.append(repr[b].index_select(0, grp).float().mean(dim=0))
-            ids.append(b)
-    if not vecs:
+    token_pos, token_gid, resp_ids, N = compute_chunk_assignment(position_mask, num_chunks)
+    if N == 0:
         return repr.new_zeros(0, D), repr.new_zeros(0, dtype=torch.long)
-    return torch.stack(vecs, dim=0), torch.tensor(ids, device=repr.device, dtype=torch.long)
+    return pool_by_assignment(repr, token_pos, token_gid, N), resp_ids
 
 
 def rkd_distance_loss(
@@ -721,9 +769,18 @@ def multi_layer_rkd_distance_loss(
     """
     losses, agg = [], {}
     angle_coef = float(angle_coef)
+    assign = None  # (token_pos, token_gid, resp_ids, N): depends only on position_mask -> compute once
     for s_l, t_l in _iter_layers(student_repr, teacher_repr, num_layers):
-        s_c, ids = chunk_pool_single_layer(s_l, position_mask, num_chunks)
-        t_c, _ = chunk_pool_single_layer(t_l, position_mask, num_chunks)
+        if assign is None:
+            pm = position_mask if position_mask is not None else s_l.new_ones(s_l.shape[0], s_l.shape[1])
+            assign = compute_chunk_assignment(pm, num_chunks)
+        tp, tg, ids, N = assign
+        if N == 0:
+            s_c = s_l.new_zeros(0, s_l.shape[-1])
+            t_c = t_l.new_zeros(0, t_l.shape[-1])
+        else:
+            s_c = pool_by_assignment(s_l, tp, tg, N)
+            t_c = pool_by_assignment(t_l, tp, tg, N)
         d_loss, m = rkd_distance_loss(s_c, t_c, ids)
         layer_loss = d_loss
         m = {**m, "rep/rkd_distance": float(d_loss.detach().item())}
@@ -753,9 +810,18 @@ def multi_layer_infonce_loss(
     "poison" negatives that otherwise cap discriminability.
     """
     losses, agg = [], {}
+    assign = None  # depends only on position_mask -> compute once, reuse across layers + s/t
     for s_l, t_l in _iter_layers(student_proj, teacher_repr, num_layers):
-        s_c, resp_ids = chunk_pool_single_layer(s_l, position_mask, num_chunks)
-        t_c, _ = chunk_pool_single_layer(t_l, position_mask, num_chunks)
+        if assign is None:
+            pm = position_mask if position_mask is not None else s_l.new_ones(s_l.shape[0], s_l.shape[1])
+            assign = compute_chunk_assignment(pm, num_chunks)
+        tp, tg, resp_ids, N = assign
+        if N == 0:
+            s_c = s_l.new_zeros(0, s_l.shape[-1])
+            t_c = t_l.new_zeros(0, t_l.shape[-1])
+        else:
+            s_c = pool_by_assignment(s_l, tp, tg, N)
+            t_c = pool_by_assignment(t_l, tp, tg, N)
         loss, m = infonce_loss(s_c, t_c, resp_ids=resp_ids, tau=tau, mask_within=mask_within)
         losses.append(loss)
         for k, v in m.items():

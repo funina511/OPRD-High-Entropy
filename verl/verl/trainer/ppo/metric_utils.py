@@ -257,7 +257,17 @@ def compute_data_metrics(
 
     sequence_score = batch.batch["token_level_scores"].sum(-1)
     sequence_reward = batch.batch["token_level_rewards"].sum(-1)
-    sequence_true_reward = batch.batch["true_reward_score"].sum(-1)
+    _trs = batch.batch["true_reward_score"]
+    # outcome-RL path stores per-sequence scalars (1D [batch_size]);
+    # token-KL / rm_scores path stores per-token tensor (2D [batch_size, seq_len]).
+    # Guard every rank: 2D -> sum over seq; 1D -> use as-is; 0-dim scalar -> lift to 1D
+    # so downstream boolean-mask indexing never hits "too many indices for tensor of dimension 0".
+    if _trs.dim() > 1:
+        sequence_true_reward = _trs.sum(-1)
+    elif _trs.dim() == 1:
+        sequence_true_reward = _trs
+    else:
+        sequence_true_reward = _trs.reshape(1)
 
     advantages = batch.batch["advantages"]
     returns = batch.batch["returns"]
