@@ -1138,6 +1138,11 @@ class RayPPOTrainer:
                             batch.meta_info["teacher_temperature"] = teacher_temperature
                             batch.meta_info["use_rep_distillation"] = use_rep_distillation
                             batch.meta_info["use_att_distillation"] = use_att_distillation
+                            # Default True preserves reverse-KL token reward when top_k=0.
+                            # Set False for RKD/OPRD + student outcome/format RL (no OPD).
+                            batch.meta_info["use_token_kl_reward"] = self.config.actor_rollout_ref.rollout.get(
+                                "use_token_kl_reward", True
+                            )
                             batch.meta_info["rep_distillation_positions"] = (
                                 self.config.actor_rollout_ref.actor.get("rep_distillation_positions", "last")
                             )

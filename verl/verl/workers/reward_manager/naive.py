@@ -27,7 +27,15 @@ from verl.workers.reward_manager.abstract import AbstractRewardManager
 class NaiveRewardManager(AbstractRewardManager):
     """The reward manager."""
 
-    def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source", enable_format_reward=False) -> None:
+    def __init__(
+        self,
+        tokenizer,
+        num_examine,
+        compute_score=None,
+        reward_fn_key="data_source",
+        enable_format_reward=False,
+        format_reward_coef: float = 0.1,
+    ) -> None:
         """
         Initialize the NaiveRewardManager instance.
 
@@ -38,12 +46,15 @@ class NaiveRewardManager(AbstractRewardManager):
             reward_fn_key: The key used to access the data source in the non-tensor batch data. Defaults to
                 "data_source".
             enable_format_reward: Whether to enable format reward. Defaults to False.
+            format_reward_coef: Soft bonus added to outcome reward when ``\\boxed`` is present and there is
+                no token-level ``rm_scores`` path (student outcome RL). Defaults to 0.1.
         """
         self.tokenizer = tokenizer  # Store the tokenizer for decoding token IDs
         self.num_examine = num_examine  # the number of batches of decoded responses to print to the console
         self.compute_score = compute_score or default_compute_score
         self.reward_fn_key = reward_fn_key  # Store the key for accessing the data source
         self.enable_format_reward = enable_format_reward
+        self.format_reward_coef = float(format_reward_coef)
 
     def __call__(self, data: DataProto, return_dict: bool = False) -> torch.Tensor | dict[str, Any]:
         """We will expand this function gradually based on the available datasets"""
@@ -58,10 +69,11 @@ class NaiveRewardManager(AbstractRewardManager):
         #         return data.batch["rm_scores"]
 
         reward_tensor = torch.zeros_like(data.batch["responses"], dtype=torch.float32)
-        format_tensor = torch.zeros(data.batch["responses"].shape[0], dtype=torch.float32) # (batch_size, )
+        format_tensor = torch.zeros(data.batch["responses"].shape[0], dtype=torch.float32)  # (batch_size, )
         reward_extra_info = defaultdict(list)
 
         already_print_data_sources = {}
+        has_rm_scores = "rm_scores" in data.batch.keys()
 
         for i in range(len(data)):
             data_item = data[i]  # DataProtoItem
@@ -81,11 +93,9 @@ class NaiveRewardManager(AbstractRewardManager):
             prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
             response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
 
+            format_score = 0.0
             if self.enable_format_reward:
-                if r"\boxed" in response_str:
-                    format_score = 1.0
-                else:
-                    format_score = 0.0
+                format_score = 1.0 if r"\boxed" in response_str else 0.0
                 format_tensor[i] = format_score
 
             ground_truth = data_item.non_tensor_batch["reward_model"]["ground_truth"]
@@ -111,6 +121,11 @@ class NaiveRewardManager(AbstractRewardManager):
             else:
                 reward = score
 
+            # Outcome-only path: soft format bonus so boxed-but-wrong > pure garbage.
+            # Do NOT apply when rm_scores drive training (OPD/token-KL); there format_mask gates PG.
+            if self.enable_format_reward and not has_rm_scores and self.format_reward_coef != 0.0:
+                reward = float(reward) + self.format_reward_coef * float(format_score)
+
             reward_tensor[i, valid_response_length - 1] = reward
 
             if data_source not in already_print_data_sources:
@@ -126,9 +141,11 @@ class NaiveRewardManager(AbstractRewardManager):
                         print(f"[{key}]", value)
                 else:
                     print("[score]", score)
+                if self.enable_format_reward and not has_rm_scores:
+                    print("[format_bonus]", self.format_reward_coef * format_score)
 
         # Caculate the reward using reward_fn first, we want to know true reward scores, but we still use rm_scores for training
-        if "rm_scores" in data.batch.keys():
+        if has_rm_scores:
             print(f"Now we are using rm_scores!")
             if return_dict:
                 reward_extra_keys = data.meta_info.get("reward_extra_keys", [])
@@ -142,7 +159,13 @@ class NaiveRewardManager(AbstractRewardManager):
             else:
                 return data.batch["rm_scores"]
 
+        # Outcome / format RL path: train on rule scores (+ soft format bonus).
+        # Do not attach format_mask here — hard-masking would zero PG on garbage and
+        # prevent learning from negative advantages on non-boxed samples.
         if return_dict:
+            reward_extra_info["true_reward_score"] = reward_tensor
+            if self.enable_format_reward:
+                reward_extra_info["format_score_raw"] = format_tensor
             return {
                 "reward_tensor": reward_tensor,
                 "reward_extra_info": reward_extra_info,

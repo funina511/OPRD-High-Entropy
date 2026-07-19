@@ -135,6 +135,11 @@ export TOP_K_STRATEGY=${TOP_K_STRATEGY:-only_stu}
 export REWARD_WEIGHT_MODE=${REWARD_WEIGHT_MODE:-student_p}
 export USE_KL=${USE_KL:-False}
 export ENABLE_FORMAT_REWARD=${ENABLE_FORMAT_REWARD:-False}
+# Soft \\boxed bonus on outcome reward when ENABLE_FORMAT_REWARD=True and no rm_scores.
+export FORMAT_REWARD_COEF=${FORMAT_REWARD_COEF:-0.1}
+# When False with OPRD: teacher still supplies hidden for RKD, but policy reward is
+# student outcome/format only (skip reverse-KL token reward / OPD).
+export USE_TOKEN_KL_REWARD=${USE_TOKEN_KL_REWARD:-True}
 export MODEL_DTYPE=${MODEL_DTYPE:-bfloat16}
 export IS_PLOT=${IS_PLOT:-True}
 export LOSS_AGG_MODE=${LOSS_AGG_MODE:-token-mean}
@@ -169,6 +174,7 @@ export SWANLAB_LOG_DIR=${SWANLAB_LOG_DIR:-${PROJECT_PATH}/swanlab_log}
 mkdir -p "$PROJECT_PATH/logs/terminal" "$PROJECT_PATH/logs/validation_log"
 
 echo "METHOD=$METHOD USE_REP=$USE_REP_DISTILLATION REP_ONLY=$REP_DISTILLATION_ONLY TOP_K=$LOG_PROB_TOP_K"
+echo "ADV=$ADV_ESTIMATOR TOKEN_KL_REWARD=$USE_TOKEN_KL_REWARD FORMAT_REWARD=$ENABLE_FORMAT_REWARD FORMAT_COEF=$FORMAT_REWARD_COEF"
 echo "student=$ACTOR_MODEL_PATH teacher=$REWARD_MODEL_PATH"
 echo "train=$TRAIN_DATASET"
 
@@ -273,6 +279,7 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.rollout.top_k_strategy=$TOP_K_STRATEGY \
     +actor_rollout_ref.rollout.reward_weight_mode=$REWARD_WEIGHT_MODE \
     +actor_rollout_ref.rollout.teacher_temperature=$TEACHER_TEMPERATURE \
+    +actor_rollout_ref.rollout.use_token_kl_reward=$USE_TOKEN_KL_REWARD \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$PARALLEL_SIZE \
     actor_rollout_ref.rollout.gpu_memory_utilization=${GPU_MEM_UTIL:-0.8} \
     actor_rollout_ref.rollout.max_model_len=$MAX_MODEL_LEN \
@@ -287,6 +294,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1 \
     reward_model.enable=True \
     +reward_model.reward_kwargs.enable_format_reward=$ENABLE_FORMAT_REWARD \
+    +reward_model.reward_kwargs.format_reward_coef=$FORMAT_REWARD_COEF \
     reward_model.model.path=$REWARD_MODEL_PATH \
     reward_model.model.input_tokenizer=null \
     reward_model.model.use_remove_padding=True \

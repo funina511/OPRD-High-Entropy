@@ -2703,6 +2703,9 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         global_steps = data.meta_info.get("global_steps", -1)
         is_plot = data.meta_info.get("is_plot", False)
         use_rep_distillation = data.meta_info.get("use_rep_distillation", False)
+        # When False: teacher still provides hidden/attn for OPRD, but do NOT build
+        # reverse-KL rm_scores. Student outcome/format RL then drives the policy head.
+        use_token_kl_reward = data.meta_info.get("use_token_kl_reward", True)
         rep_distillation_positions = data.meta_info.get("rep_distillation_positions", "last")
         rep_distillation_layers = data.meta_info.get("rep_distillation_layers", "last")
         rep_distillation_last_k = int(data.meta_info.get("rep_distillation_last_k", 32))
@@ -2970,9 +2973,18 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                 # because it needs student_on_teacher_log_probs which requires another actor forward
                 rm_scores = None 
                 overlap_mask = teacher_overlap_mask
-            elif (use_rep_distillation or use_att_distillation) and student_logp is None:
+            elif (use_rep_distillation or use_att_distillation) and (
+                student_logp is None or not use_token_kl_reward
+            ):
+                # Rep/Att distillation needs teacher forwards, but policy reward may be
+                # student outcome/format only (no token-level reverse KL / OPD).
                 rm_scores = None
                 overlap_mask = None
+                if not use_token_kl_reward:
+                    print(
+                        "use_token_kl_reward=False: skip reverse-KL rm_scores; "
+                        "teacher repr still returned for OPRD"
+                    )
             else:
                 if student_logp is None:
                     raise ValueError("old_log_probs is required when log_prob_top_k=0 and rep distillation is disabled.")
