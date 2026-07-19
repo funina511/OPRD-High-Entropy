@@ -1100,6 +1100,7 @@ class DataParallelPPOActor(BasePPOActor):
             raise ValueError(f"rep_align_loss must be mse|rkd|infonce, got {rep_align_loss!r}")
         rep_chunks = int(self.config.get("rep_chunks", 8))
         rep_infonce_tau = float(self.config.get("rep_infonce_tau", 0.07))
+        rep_infonce_mask_within = bool(self.config.get("rep_infonce_mask_within", False))
 
         select_keys = [
             "responses",
@@ -1488,6 +1489,7 @@ class DataParallelPPOActor(BasePPOActor):
                                     rep_chunks,
                                     tau=rep_infonce_tau,
                                     num_layers=num_rep_layers,
+                                    mask_within=rep_infonce_mask_within,
                                 )
                                 micro_batch_metrics.update(rel_metrics)
                                 # student_repr already projected to teacher dim -> metrics valid.

@@ -615,22 +615,48 @@ def rkd_distance_loss(
 def infonce_loss(
     z_s: torch.Tensor,
     t_chunks: torch.Tensor,
+    resp_ids: torch.Tensor | None = None,
     tau: float = 0.07,
+    mask_within: bool = False,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """InfoNCE, student->teacher. z_s already projected to teacher dim (N, d_t).
 
-    Positive = own chunk (diagonal); negatives = all other chunks in batch. Teacher detached.
+    Positive = own chunk (diagonal). Negatives = other chunks in batch. Teacher detached.
+    When mask_within=True and resp_ids given, chunks from the SAME response are removed
+    from the denominator (they are near-duplicate "poison" negatives): only cross-response
+    chunks act as negatives. If an anchor ends up with no valid negative (its whole
+    micro-batch is one response), it is dropped from the loss and counted as degenerate.
     """
     N = z_s.size(0)
     if N < 2:
-        return z_s.sum() * 0.0, {"rep/nce_acc": 0.0, "rep/nce_n_items": float(N)}
+        return z_s.sum() * 0.0, {"rep/nce_acc": 0.0, "rep/nce_n_items": float(N),
+                                 "rep/nce_valid_neg": 0.0, "rep/nce_degenerate_frac": 1.0}
     zs = F.normalize(z_s.float(), dim=-1)
     zt = F.normalize(t_chunks.float().detach(), dim=-1)
     logits = zs @ zt.T / tau
     labels = torch.arange(N, device=z_s.device)
-    loss = F.cross_entropy(logits, labels)
-    acc = (logits.argmax(dim=-1) == labels).float().mean()
-    return loss, {"rep/nce_acc": float(acc.detach().item()), "rep/nce_n_items": float(N)}
+    eye = torch.eye(N, dtype=torch.bool, device=z_s.device)
+    if mask_within and resp_ids is not None:
+        same_resp = (resp_ids[:, None] == resp_ids[None, :]) & ~eye
+        logits = logits.masked_fill(same_resp, float("-inf"))
+        # per-anchor count of valid (cross-response) negatives
+        valid_neg = (~eye & ~same_resp).sum(dim=1)  # (N,)
+    else:
+        valid_neg = (~eye).sum(dim=1)
+    keep = valid_neg > 0  # anchors with at least one real negative
+    n_keep = int(keep.sum().item())
+    degen_frac = 1.0 - n_keep / N
+    if n_keep == 0:
+        return z_s.sum() * 0.0, {"rep/nce_acc": 0.0, "rep/nce_n_items": float(N),
+                                 "rep/nce_valid_neg": 0.0, "rep/nce_degenerate_frac": 1.0}
+    loss = F.cross_entropy(logits[keep], labels[keep])
+    acc = (logits[keep].argmax(dim=-1) == labels[keep]).float().mean()
+    return loss, {
+        "rep/nce_acc": float(acc.detach().item()),
+        "rep/nce_n_items": float(N),
+        "rep/nce_valid_neg": float(valid_neg[keep].float().mean().item()),
+        "rep/nce_degenerate_frac": float(degen_frac),
+    }
 
 
 def _iter_layers(student_repr, teacher_repr, num_layers):
@@ -663,13 +689,19 @@ def multi_layer_rkd_distance_loss(
 
 def multi_layer_infonce_loss(
     student_proj, teacher_repr, position_mask, num_chunks, tau=0.07, num_layers=None,
+    mask_within=False,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """InfoNCE averaged over layers. student_proj already in teacher dim (B,[L,]S,d_t)."""
+    """InfoNCE averaged over layers. student_proj already in teacher dim (B,[L,]S,d_t).
+
+    mask_within=True removes same-response chunks from each anchor's negatives (see
+    infonce_loss): only cross-response chunks are negatives, killing the near-duplicate
+    "poison" negatives that otherwise cap discriminability.
+    """
     losses, agg = [], {}
     for s_l, t_l in _iter_layers(student_proj, teacher_repr, num_layers):
-        s_c, _ = chunk_pool_single_layer(s_l, position_mask, num_chunks)
+        s_c, resp_ids = chunk_pool_single_layer(s_l, position_mask, num_chunks)
         t_c, _ = chunk_pool_single_layer(t_l, position_mask, num_chunks)
-        loss, m = infonce_loss(s_c, t_c, tau=tau)
+        loss, m = infonce_loss(s_c, t_c, resp_ids=resp_ids, tau=tau, mask_within=mask_within)
         losses.append(loss)
         for k, v in m.items():
             agg[k] = agg.get(k, 0.0) + v

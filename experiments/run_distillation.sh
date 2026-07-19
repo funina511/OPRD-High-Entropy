@@ -67,6 +67,8 @@ export REP_LOW_RANK=${REP_LOW_RANK:-256}
 export REP_ALIGN_LOSS=${REP_ALIGN_LOSS:-mse}
 export REP_CHUNKS=${REP_CHUNKS:-8}
 export REP_INFONCE_TAU=${REP_INFONCE_TAU:-0.07}
+# Mask same-response chunks out of each InfoNCE anchor's negatives (poison-negative fix)
+export REP_INFONCE_MASK_WITHIN=${REP_INFONCE_MASK_WITHIN:-False}
 
 export USE_ATT_DISTILLATION=${USE_ATT_DISTILLATION:-False}
 export ATT_DISTILLATION_COEF=${ATT_DISTILLATION_COEF:-1.0}
@@ -231,6 +233,7 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.actor.rep_align_loss=${REP_ALIGN_LOSS} \
     +actor_rollout_ref.actor.rep_chunks=${REP_CHUNKS} \
     +actor_rollout_ref.actor.rep_infonce_tau=${REP_INFONCE_TAU} \
+    +actor_rollout_ref.actor.rep_infonce_mask_within=${REP_INFONCE_MASK_WITHIN} \
     ${REP_LOW_RANK_INIT_CHECKPOINT:++actor_rollout_ref.actor.rep_low_rank_init_checkpoint="$REP_LOW_RANK_INIT_CHECKPOINT"} \
     +actor_rollout_ref.actor.rep_ps_projector=${REP_PS_PROJECTOR:-auto} \
     +actor_rollout_ref.actor.rep_mlp_hidden_mult=${REP_MLP_HIDDEN_MULT:-4} \
