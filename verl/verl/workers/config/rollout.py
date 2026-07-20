@@ -146,6 +146,9 @@ class RolloutConfig(BaseConfig):
     # If False with OPRD: teacher still provides hidden for RKD, but skip reverse-KL
     # rm_scores so student outcome/format RL drives the policy head.
     use_token_kl_reward: bool = True
+    # Surface channel (②): return teacher per-token log-prob on student response
+    # tokens so the trainer can build a text-manifold teacher-likelihood reward.
+    use_surface_reward: bool = False
 
     disable_log_stats: bool = True
 

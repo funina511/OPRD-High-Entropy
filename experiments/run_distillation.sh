@@ -150,6 +150,10 @@ export FORMAT_REWARD_COEF=${FORMAT_REWARD_COEF:-0.1}
 # When False with OPRD: teacher still supplies hidden for RKD, but policy reward is
 # student outcome/format only (skip reverse-KL token reward / OPD).
 export USE_TOKEN_KL_REWARD=${USE_TOKEN_KL_REWARD:-True}
+# Surface channel (②): teacher-likelihood reward on student's decoded text.
+# When True, token_level_rewards is OVERWRITTEN by length-normalized teacher LL
+# (pure on-policy text-manifold distillation; no outcome/format PG term).
+export USE_SURFACE_REWARD=${USE_SURFACE_REWARD:-False}
 export MODEL_DTYPE=${MODEL_DTYPE:-bfloat16}
 export IS_PLOT=${IS_PLOT:-True}
 export LOSS_AGG_MODE=${LOSS_AGG_MODE:-token-mean}
@@ -295,6 +299,7 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.rollout.reward_weight_mode=$REWARD_WEIGHT_MODE \
     +actor_rollout_ref.rollout.teacher_temperature=$TEACHER_TEMPERATURE \
     +actor_rollout_ref.rollout.use_token_kl_reward=${USE_TOKEN_KL_REWARD:-True} \
+    +actor_rollout_ref.rollout.use_surface_reward=${USE_SURFACE_REWARD:-False} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$PARALLEL_SIZE \
     actor_rollout_ref.rollout.gpu_memory_utilization=${GPU_MEM_UTIL:-0.8} \
     actor_rollout_ref.rollout.max_model_len=$MAX_MODEL_LEN \

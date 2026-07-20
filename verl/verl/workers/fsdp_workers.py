@@ -2706,6 +2706,11 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         # When False: teacher still provides hidden/attn for OPRD, but do NOT build
         # reverse-KL rm_scores. Student outcome/format RL then drives the policy head.
         use_token_kl_reward = data.meta_info.get("use_token_kl_reward", True)
+        # Surface channel (②): expose teacher per-token log-prob on the student's
+        # response tokens so the trainer can build a text-manifold reward. Same-vocab
+        # prototype: teacher reads identical token ids, so teacher_logp already IS the
+        # teacher log-likelihood of the student's decoded text (no retokenize needed).
+        use_surface_reward = data.meta_info.get("use_surface_reward", False)
         rep_distillation_positions = data.meta_info.get("rep_distillation_positions", "last")
         rep_distillation_layers = data.meta_info.get("rep_distillation_layers", "last")
         rep_distillation_last_k = int(data.meta_info.get("rep_distillation_last_k", 32))
@@ -3018,6 +3023,11 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                 tensors["overlap_mask"] = overlap_mask
             if teacher_in_student_mask is not None:
                 tensors["teacher_in_student_mask"] = teacher_in_student_mask
+            if use_surface_reward and teacher_logp is not None:
+                # (bsz, resp_len): teacher per-token log-prob on student response tokens.
+                # In use_token_kl_reward=False runs this is otherwise dropped; keep it so
+                # the trainer can reduce it to a sequence-level surface reward.
+                tensors["teacher_full_logp"] = teacher_logp
             if teacher_last_hidden_repr is not None:
                 tensors["teacher_last_hidden_repr"] = teacher_last_hidden_repr
             if teacher_attn_rows is not None:

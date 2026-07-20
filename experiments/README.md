@@ -46,6 +46,9 @@ var is set + baked into the run name but never reaches the trainer). Skip with
 | `exp_oprd_bridge.sh` | **cross-arch OPRD-Bridge** | rep-only in a frozen low-rank subspace. **Requires the bridge built first** (below). |
 | `exp_full_linear.sh` | **full-linear ablation** | no PCA; one trainable Linear(1024→2560) + normalized MSE. Compare vs the bridge. |
 | `build_bridge.sh` | bridge prerequisites | builds + freezes the bridge (Stage 0 + Stage 1) that `exp_oprd_bridge.sh` needs |
+| `exp_rl_surf.sh` | **surface-only (arm A)** | on-policy text-manifold distillation: reward = teacher log-lik of the student's decoded text. RKD off (`coef=0`), no outcome/format. See §Surface channel. |
+| `exp_rel_rkd_da_all.sh` | **RKD-only (arm B)** | pure RKD-D + RKD-A loss, `rep_distillation_only`, **no reward / no PG**. The representation-channel baseline. |
+| `exp_rel_rkd_da_rl_surf.sh` | **RKD + surface (arm C)** | RKD loss + surface PG reward, no outcome/format. OPRD composite with the vocab-locked OPD term swapped for a vocab-free one. |
 
 > Same-architecture **OPRD-Vanilla** (naive `full` projector) does **not** apply to a 4B→0.6B pair:
 > the projector never aligns (cosine ≈ 0) and rep-only collapses (repetition, AMC23 → 0). Cross-arch
@@ -118,6 +121,50 @@ These are handled automatically; listed so they're not re-discovered the hard wa
 > The `scripts/analysis/*.sh` launchers were rewritten: the originals passed CLI flags the current
 > Python argparsers reject (e.g. `--subspace-mode`, `--generate-backend`, `--max-batch-tokens`) and
 > used `--layer-mode even`, so they crashed on launch. The versions here pass only supported flags.
+
+## Surface channel (②) & the A/B/C ablation
+
+Rep-only RKD transfers the teacher's reasoning *process* but leaves `lm_head` without
+gradient, so the student's *output* drifts (wrong-language prefixes, format collapse). The
+**surface channel** closes that: the student samples a response, we score it under the
+**frozen teacher's likelihood**, and use the length-normalized teacher log-lik as an
+**on-policy policy-gradient reward** (GRPO). It is the reverse-KL OPD term generalized off
+the shared-vocab simplex onto a **tokenizer-agnostic text manifold** — only *text* crosses
+the model boundary, the reward is a scalar, so it never touches logit vectors and needs no
+shared vocabulary.
+
+Because the reward scores *sampled* tokens through a frozen teacher, it is inherently
+non-differentiable → delivered by PG, not a backward loss. GRPO's within-group baseline
+cancels the absolute-PPL scale, leaving "which of the n samples reads more like the teacher".
+
+> **Same-vocab prototype.** Here teacher = Qwen3-4B, student = Qwen3-0.6B-Base share a
+> tokenizer, so the teacher reads the *same* token ids and `teacher_logp` already **is** the
+> teacher log-lik of the student's text — no decode/retokenize/offset-map. The true
+> cross-vocab path (decode → teacher retokenize → char-span remap) is a heavier follow-up.
+> This step only answers "does a surface channel help at all", not the cross-vocab claim.
+
+All three arms are **pure distillation** — no outcome/format reward anywhere (accuracy is an
+eval metric only), so the channels dissociate cleanly:
+
+| Arm | Script | Training signal | Answers |
+| --- | --- | --- | --- |
+| **A** | `exp_rl_surf.sh` | surface PG only (RKD `coef=0`) | does the surface channel work standalone |
+| **B** | `exp_rel_rkd_da_all.sh` | RKD loss only, no reward | representation channel alone |
+| **C** | `exp_rel_rkd_da_rl_surf.sh` | RKD loss + surface PG | **C vs B = the surface increment on top of RKD** |
+
+All use `ADV_ESTIMATOR=grpo`, `N_RESPONSES=4` (pure teacher-LL leans on the group baseline,
+so a larger group is steadier). No `λ`: under GRPO std-norm a reward scale is a no-op; the
+only channel-balance knob in C is `μ = REP_DISTILLATION_COEF` (RKD loss vs PG loss).
+
+**The knob:** `USE_SURFACE_REWARD` (default `False`). When `True`, `token_level_rewards` is
+**overwritten** by the length-normalized teacher log-lik injected at each sequence's last
+token (same placement as an outcome reward); `token_level_scores` (outcome) is kept untouched
+for eval/metrics. New metrics: `surface/teacher_ll_{mean,std}`.
+
+Implemented across: `RolloutConfig.use_surface_reward` field
+(`verl/workers/config/rollout.py`); RM worker returns `teacher_full_logp` when the flag is set
+(`verl/workers/fsdp_workers.py`); trainer builds + injects the reward and logs the metrics
+(`verl/trainer/ppo/ray_trainer.py`); env→hydra wiring in `run_distillation.sh`.
 
 ## What we observed (4B → 0.6B, DAPO-Math-5k, AMC23 acc@4)
 

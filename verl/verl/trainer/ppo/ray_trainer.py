@@ -1152,6 +1152,11 @@ class RayPPOTrainer:
                             batch.meta_info["use_token_kl_reward"] = self.config.actor_rollout_ref.rollout.get(
                                 "use_token_kl_reward", True
                             )
+                            # Surface channel (②): ask RM worker to return teacher per-token
+                            # log-prob on student response tokens (text-manifold reward source).
+                            batch.meta_info["use_surface_reward"] = self.config.actor_rollout_ref.rollout.get(
+                                "use_surface_reward", False
+                            )
                             batch.meta_info["rep_distillation_positions"] = (
                                 self.config.actor_rollout_ref.actor.get("rep_distillation_positions", "last")
                             )
@@ -1431,6 +1436,26 @@ class RayPPOTrainer:
                             metrics.update(kl_metrics)
                         else:
                             batch.batch["token_level_rewards"] = batch.batch["token_level_scores"]
+
+                        # --- Surface channel (②): text-manifold teacher-likelihood reward ---
+                        # On-policy distillation: reward = length-normalized teacher log-lik
+                        # of the student's decoded text. Overwrites token_level_rewards so the
+                        # PG signal is PURE distillation (no outcome/format term); the group
+                        # baseline in GRPO cancels the absolute PPL scale, leaving "which
+                        # sample reads more like the teacher" within each prompt group.
+                        # token_level_scores (outcome) is kept untouched for eval/metrics only.
+                        if "teacher_full_logp" in batch.batch:
+                            resp_mask = batch.batch["response_mask"]
+                            tfl = batch.batch["teacher_full_logp"].to(resp_mask.device)
+                            valid = resp_mask.sum(-1).clamp(min=1)
+                            seq_ll = (tfl * resp_mask).sum(-1) / valid  # (bsz,) length-normalized
+                            surf_reward = torch.zeros_like(batch.batch["token_level_rewards"])
+                            last_idx = (resp_mask.long().cumsum(-1).argmax(-1))  # last valid token
+                            rows = torch.arange(surf_reward.size(0), device=surf_reward.device)
+                            surf_reward[rows, last_idx] = seq_ll.to(surf_reward.dtype)
+                            batch.batch["token_level_rewards"] = surf_reward
+                            metrics["surface/teacher_ll_mean"] = seq_ll.mean().detach().item()
+                            metrics["surface/teacher_ll_std"] = seq_ll.std().detach().item()
 
                         # Compute rollout correction weights centrally (once per batch)
                         # This corrects for off-policy issues (policy mismatch, model staleness, etc.)
