@@ -149,6 +149,10 @@ class RolloutConfig(BaseConfig):
     # Surface channel (②): return teacher per-token log-prob on student response
     # tokens so the trainer can build a text-manifold teacher-likelihood reward.
     use_surface_reward: bool = False
+    # Cross-vocab surface (①): teacher tokenizer != student. RM worker decodes the
+    # student text, re-tokenizes with the teacher tokenizer, and returns a length-
+    # normalized scalar seq_ll (teacher token-mean logp) instead of per-token logp.
+    surface_reward_cross_vocab: bool = False
 
     disable_log_stats: bool = True
 

@@ -1157,6 +1157,15 @@ class RayPPOTrainer:
                             batch.meta_info["use_surface_reward"] = self.config.actor_rollout_ref.rollout.get(
                                 "use_surface_reward", False
                             )
+                            # Cross-vocab surface (①): teacher tokenizer != student.
+                            # RM worker decodes student text, re-tokenizes with the
+                            # teacher tokenizer, and returns a length-normalized scalar
+                            # teacher_surface_ll instead of per-token teacher_full_logp.
+                            batch.meta_info["surface_reward_cross_vocab"] = (
+                                self.config.actor_rollout_ref.rollout.get(
+                                    "surface_reward_cross_vocab", False
+                                )
+                            )
                             batch.meta_info["rep_distillation_positions"] = (
                                 self.config.actor_rollout_ref.actor.get("rep_distillation_positions", "last")
                             )
@@ -1444,11 +1453,20 @@ class RayPPOTrainer:
                         # baseline in GRPO cancels the absolute PPL scale, leaving "which
                         # sample reads more like the teacher" within each prompt group.
                         # token_level_scores (outcome) is kept untouched for eval/metrics only.
-                        if "teacher_full_logp" in batch.batch:
+                        # seq_ll source: cross-vocab returns a ready scalar
+                        # (teacher_surface_ll, already normalized by teacher token
+                        # count); same-vocab reduces per-token teacher_full_logp with
+                        # the student response mask.
+                        seq_ll = None
+                        if "teacher_surface_ll" in batch.batch:
+                            resp_mask = batch.batch["response_mask"]
+                            seq_ll = batch.batch["teacher_surface_ll"].to(resp_mask.device).float()
+                        elif "teacher_full_logp" in batch.batch:
                             resp_mask = batch.batch["response_mask"]
                             tfl = batch.batch["teacher_full_logp"].to(resp_mask.device)
                             valid = resp_mask.sum(-1).clamp(min=1)
                             seq_ll = (tfl * resp_mask).sum(-1) / valid  # (bsz,) length-normalized
+                        if seq_ll is not None:
                             surf_reward = torch.zeros_like(batch.batch["token_level_rewards"])
                             last_idx = (resp_mask.long().cumsum(-1).argmax(-1))  # last valid token
                             rows = torch.arange(surf_reward.size(0), device=surf_reward.device)

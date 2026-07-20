@@ -2680,6 +2680,122 @@ class RewardModelWorker(Worker, DistProfilerExtension):
 
         return DataProto.from_dict(rm_inputs)
 
+    def _build_xvocab_surface_inputs(self, data: DataProto):
+        """Cross-vocab surface: decode student response with the student (input)
+        tokenizer, re-encode [prompt|response] with the TEACHER tokenizer/chat
+        template, and record where the teacher-side response span begins.
+
+        Returns right-padded teacher input_ids/attention_mask/position_ids plus,
+        per sample, (prompt_len, full_len) in teacher tokens. The response span is
+        [prompt_len:full_len); teacher logp is summed over it and normalized by
+        (full_len - prompt_len) = teacher response token count. No token-level
+        alignment to the student is needed — only the decoded text crosses the
+        vocab boundary, exactly the text-manifold premise of the surface channel.
+        """
+        src_tokenizer = self.input_tokenizer   # student
+        tgt_tokenizer = self.tokenizer         # teacher
+        src_max_length = data.batch["attention_mask"].shape[-1]
+        max_length = self.config.get("max_length", None) or src_max_length
+
+        rm_input_ids, rm_attention_mask, spans = [], [], []
+        for i in range(data.batch.batch_size[0]):
+            chat = list(data.non_tensor_batch["raw_prompt"][i])
+
+            response_ids = data.batch["responses"][i]
+            response_length = response_ids.shape[-1]
+            valid_len = data.batch["attention_mask"][i][-response_length:].sum()
+            valid_response_ids = response_ids[:valid_len]
+            response = src_tokenizer.decode(valid_response_ids)
+            if src_tokenizer.eos_token:
+                response = response.replace(src_tokenizer.eos_token, "")
+
+            # prompt-only (teacher vocab) — establishes the response boundary
+            prompt_text = tgt_tokenizer.apply_chat_template(
+                chat, add_generation_prompt=True, tokenize=False
+            )
+            full_text = tgt_tokenizer.apply_chat_template(
+                chat + [{"role": "assistant", "content": response}],
+                add_generation_prompt=False, tokenize=False,
+            )
+            prompt_ids = tgt_tokenizer(prompt_text, add_special_tokens=False)["input_ids"]
+            full_ids = tgt_tokenizer(full_text, add_special_tokens=False)["input_ids"]
+
+            # Robust boundary: longest common prefix (guards templates that mutate
+            # the prompt when an assistant turn is appended).
+            lcp = 0
+            for a, b in zip(prompt_ids, full_ids):
+                if a != b:
+                    break
+                lcp += 1
+            prompt_len = lcp
+            full_len = len(full_ids)
+            if full_len <= prompt_len:  # empty/degenerate response
+                full_len = min(prompt_len + 1, len(full_ids)) if full_ids else prompt_len
+
+            ids = torch.tensor(full_ids, dtype=torch.long)
+            # Right-truncate to max_length; response span stays anchored at the front.
+            if ids.shape[0] > max_length:
+                ids = ids[:max_length]
+                full_len = min(full_len, max_length)
+                prompt_len = min(prompt_len, max_length)
+            attn = torch.ones_like(ids)
+            pad = max_length - ids.shape[0]
+            if pad > 0:
+                pad_id = tgt_tokenizer.pad_token_id or tgt_tokenizer.eos_token_id or 0
+                ids = torch.cat([ids, torch.full((pad,), pad_id, dtype=torch.long)])
+                attn = torch.cat([attn, torch.zeros(pad, dtype=torch.long)])
+
+            rm_input_ids.append(ids.unsqueeze(0))
+            rm_attention_mask.append(attn.unsqueeze(0))
+            spans.append((int(prompt_len), int(full_len)))
+
+        rm_input_ids = torch.cat(rm_input_ids, dim=0)
+        rm_attention_mask = torch.cat(rm_attention_mask, dim=0)
+        rm_position_ids = compute_position_id_with_mask(rm_attention_mask)
+        rm_data = DataProto.from_dict({
+            "input_ids": rm_input_ids,
+            "attention_mask": rm_attention_mask,
+            "position_ids": rm_position_ids,
+        })
+        return rm_data, spans
+
+    def _compute_surface_reward_cross_vocab(self, data: DataProto):
+        """Teacher sequence log-likelihood of the student's decoded text, in the
+        TEACHER's own vocabulary. Returns (bsz,) length-normalized scalar seq_ll.
+        Lean path: no top-k / entropy / hidden-repr (surface-only experiment)."""
+        rm_data, spans = self._build_xvocab_surface_inputs(data)
+        rm_data = rm_data.to(get_device_id())
+        input_ids = rm_data.batch["input_ids"]
+        attention_mask = rm_data.batch["attention_mask"]
+        position_ids = rm_data.batch["position_ids"]
+
+        bsz = input_ids.shape[0]
+        mbs = int(self.config.get("micro_batch_size_per_gpu", 0) or 4)
+        seq_ll = torch.zeros(bsz, dtype=torch.float32, device=input_ids.device)
+        with torch.no_grad(), self.ulysses_sharding_manager:
+            for s in range(0, bsz, mbs):
+                e = min(s + mbs, bsz)
+                out = self.reward_module(
+                    input_ids=input_ids[s:e],
+                    attention_mask=attention_mask[s:e],
+                    position_ids=position_ids[s:e],
+                    use_cache=False,
+                    return_dict=True,
+                )
+                logits = (out[0] if isinstance(out, tuple) else out.logits).float()
+                # logp of token[t+1] given prefix up to t
+                logp = verl_F.logprobs_from_logits(logits[:, :-1, :], input_ids[s:e, 1:])
+                for j in range(s, e):
+                    p_len, f_len = spans[j]
+                    # response token at input pos k (p_len..f_len-1) predicted by logits[k-1]
+                    # → logp index k-1, valid range [p_len-1 : f_len-1]
+                    lo = max(p_len - 1, 0)
+                    hi = f_len - 1
+                    span_logp = logp[j - s, lo:hi]
+                    if span_logp.numel() > 0:
+                        seq_ll[j] = span_logp.sum() / span_logp.numel()
+        return seq_ll
+
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="reward"))
     @DistProfiler.annotate(color="brown")
     def compute_rm_score(self, data: DataProto, kl_estimator="k1"):
@@ -2711,6 +2827,22 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         # prototype: teacher reads identical token ids, so teacher_logp already IS the
         # teacher log-likelihood of the student's decoded text (no retokenize needed).
         use_surface_reward = data.meta_info.get("use_surface_reward", False)
+        # Cross-vocab surface (①): teacher vocab != student vocab. Decode student
+        # text, re-tokenize with teacher tokenizer, and return a length-normalized
+        # scalar seq_ll per sample (no token alignment). Requires input_tokenizer
+        # (student) to be set on the RM worker. Lean early-return path.
+        surface_reward_cross_vocab = data.meta_info.get("surface_reward_cross_vocab", False)
+        if use_surface_reward and surface_reward_cross_vocab:
+            if not self._do_switch_chat_template:
+                raise RuntimeError(
+                    "surface_reward_cross_vocab=True requires reward_model.model.input_tokenizer "
+                    "(student tokenizer) to be set so the RM worker can decode/re-tokenize."
+                )
+            seq_ll = self._compute_surface_reward_cross_vocab(data)
+            if self.rank == 0:
+                print(f"[xvocab surface] seq_ll mean={seq_ll.mean().item():.4f} "
+                      f"std={seq_ll.std().item():.4f} bsz={seq_ll.numel()}")
+            return DataProto.from_dict(tensors={"teacher_surface_ll": seq_ll})
         rep_distillation_positions = data.meta_info.get("rep_distillation_positions", "last")
         rep_distillation_layers = data.meta_info.get("rep_distillation_layers", "last")
         rep_distillation_last_k = int(data.meta_info.get("rep_distillation_last_k", 32))

@@ -300,6 +300,7 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.rollout.teacher_temperature=$TEACHER_TEMPERATURE \
     +actor_rollout_ref.rollout.use_token_kl_reward=${USE_TOKEN_KL_REWARD:-True} \
     +actor_rollout_ref.rollout.use_surface_reward=${USE_SURFACE_REWARD:-False} \
+    +actor_rollout_ref.rollout.surface_reward_cross_vocab=${SURFACE_REWARD_CROSS_VOCAB:-False} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$PARALLEL_SIZE \
     actor_rollout_ref.rollout.gpu_memory_utilization=${GPU_MEM_UTIL:-0.8} \
     actor_rollout_ref.rollout.max_model_len=$MAX_MODEL_LEN \
@@ -316,7 +317,7 @@ python3 -m verl.trainer.main_ppo \
     +reward_model.reward_kwargs.enable_format_reward=$ENABLE_FORMAT_REWARD \
     +reward_model.reward_kwargs.format_reward_coef=$FORMAT_REWARD_COEF \
     reward_model.model.path=$REWARD_MODEL_PATH \
-    reward_model.model.input_tokenizer=null \
+    reward_model.model.input_tokenizer=${REWARD_INPUT_TOKENIZER:-null} \
     reward_model.model.use_remove_padding=True \
     reward_model.model.fsdp_config.param_offload=${REWARD_PARAM_OFFLOAD:-False} \
     +reward_model.model.dtype=$MODEL_DTYPE \
