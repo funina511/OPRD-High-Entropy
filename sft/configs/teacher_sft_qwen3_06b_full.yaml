@@ -1,0 +1,62 @@
+### model
+# Overridden by sft/run_sft.sh.
+model_name_or_path: REPLACE_WITH_QWEN3_0.6B_BASE
+trust_remote_code: true
+flash_attn: auto
+
+### method
+stage: sft
+do_train: true
+finetuning_type: full
+deepspeed: examples/deepspeed/ds_z2_config.json
+
+### dataset
+# Both values are overridden by sft/run_sft.sh.
+dataset: dapo5k_teacher_sft
+dataset_dir: REPLACE_WITH_PREPARED_DATA_DIR
+template: qwen3
+enable_thinking: false
+cutoff_len: 10240
+train_on_prompt: false
+packing: false
+overwrite_cache: true
+preprocessing_num_workers: 16
+dataloader_num_workers: 4
+
+### output and reporting
+output_dir: REPLACE_WITH_OUTPUT_DIR
+overwrite_output_dir: false
+logging_steps: 1
+save_steps: 50
+save_total_limit: 3
+save_only_model: false
+plot_loss: true
+report_to: wandb
+run_name: teacher-sft-qwen3-4b-to-06b-dapo5k
+
+### train
+# 4 GPUs * per_device=1 * grad_accum=4 = effective batch 16.
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 4
+gradient_checkpointing: true
+learning_rate: 1.0e-5
+# -1 means one complete epoch. Set a positive MAX_STEPS in run_sft.sh for a
+# fixed-update-budget comparison.
+max_steps: -1
+num_train_epochs: 1.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.03
+weight_decay: 0.0
+max_grad_norm: 1.0
+bf16: true
+seed: 42
+data_seed: 42
+include_num_input_tokens_seen: true
+ddp_timeout: 180000000
+resume_from_checkpoint: null
+
+### validation loss (final math accuracy is measured separately by run_eval.sh)
+val_size: 0.02
+per_device_eval_batch_size: 1
+eval_strategy: steps
+eval_steps: 25

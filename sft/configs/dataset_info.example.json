@@ -1,0 +1,18 @@
+{
+  "dapo5k_teacher_sft": {
+    "file_name": "teacher_sft.jsonl",
+    "formatting": "sharegpt",
+    "columns": {
+      "messages": "messages"
+    },
+    "tags": {
+      "role_tag": "role",
+      "content_tag": "content",
+      "user_tag": "user",
+      "assistant_tag": "assistant",
+      "system_tag": "system",
+      "observation_tag": "tool",
+      "function_tag": "function"
+    }
+  }
+}
