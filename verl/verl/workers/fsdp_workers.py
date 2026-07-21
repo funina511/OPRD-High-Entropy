@@ -2680,7 +2680,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
 
         return DataProto.from_dict(rm_inputs)
 
-    def _build_xvocab_surface_inputs(self, data: DataProto):
+    def _build_xvocab_surface_inputs(self, data: DataProto, max_length=None):
         """Cross-vocab surface: decode student response with the student (input)
         tokenizer, re-encode [prompt|response] with the TEACHER tokenizer/chat
         template, and record where the teacher-side response span begins.
@@ -2695,7 +2695,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         src_tokenizer = self.input_tokenizer   # student
         tgt_tokenizer = self.tokenizer         # teacher
         src_max_length = data.batch["attention_mask"].shape[-1]
-        max_length = self.config.get("max_length", None) or src_max_length
+        max_length = max_length or src_max_length
 
         rm_input_ids, rm_attention_mask, spans = [], [], []
         for i in range(data.batch.batch_size[0]):
@@ -2733,11 +2733,15 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                 full_len = min(prompt_len + 1, len(full_ids)) if full_ids else prompt_len
 
             ids = torch.tensor(full_ids, dtype=torch.long)
-            # Right-truncate to max_length; response span stays anchored at the front.
+            # full_ids = [prompt | response]; the response we score is at the TAIL.
+            # Left-truncate the PROMPT (drop from the front) so the response span is
+            # always preserved. Right-truncation would delete the very tokens we score
+            # and silently zero the reward for long-prompt samples.
             if ids.shape[0] > max_length:
-                ids = ids[:max_length]
-                full_len = min(full_len, max_length)
-                prompt_len = min(prompt_len, max_length)
+                drop = ids.shape[0] - max_length
+                ids = ids[drop:]
+                full_len = full_len - drop
+                prompt_len = max(prompt_len - drop, 0)
             attn = torch.ones_like(ids)
             pad = max_length - ids.shape[0]
             if pad > 0:
@@ -2759,11 +2763,18 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         })
         return rm_data, spans
 
-    def _compute_surface_reward_cross_vocab(self, data: DataProto):
+    def _compute_surface_reward_cross_vocab(self, data: DataProto, topk=2048, max_length=None,
+                                            log_tail_gap=False):
         """Teacher sequence log-likelihood of the student's decoded text, in the
-        TEACHER's own vocabulary. Returns (bsz,) length-normalized scalar seq_ll.
-        Lean path: no top-k / entropy / hidden-repr (surface-only experiment)."""
-        rm_data, spans = self._build_xvocab_surface_inputs(data)
+        TEACHER's own vocabulary. Returns (seq_ll, valid, tail_gap), each (bsz,):
+        - seq_ll: length-normalized scalar teacher token-mean logp (0.0 where invalid)
+        - valid:  bool, False for degenerate spans (empty/collapsed response) so the
+                  trainer can exclude them from the GRPO baseline instead of scoring 0
+        - tail_gap: mean per-token logsumexp(full V) - logsumexp(top-k), i.e. the S2
+                    denominator bias (>=0, larger at high-entropy positions). Only
+                    computed when log_tail_gap=True (one extra full-V reduction).
+        Lean path: no entropy / hidden-repr (surface-only experiment)."""
+        rm_data, spans = self._build_xvocab_surface_inputs(data, max_length=max_length)
         rm_data = rm_data.to(get_device_id())
         input_ids = rm_data.batch["input_ids"]
         attention_mask = rm_data.batch["attention_mask"]
@@ -2771,7 +2782,20 @@ class RewardModelWorker(Worker, DistProfilerExtension):
 
         bsz = input_ids.shape[0]
         mbs = int(self.config.get("micro_batch_size_per_gpu", 0) or 4)
+        # Teacher LM head is full-vocab (Phi-4-mini ~200k). The exact per-token
+        # logp = logit[target] - logsumexp(all_vocab); that fp32 [N, 200064]
+        # log_softmax/reshape is what OOMs a 24GB card. Instead we keep the
+        # NUMERATOR exact (gather the target logit by index — correct even when
+        # the student's token is outside the teacher's top-k) and approximate
+        # ONLY the partition function with a top-k logsumexp. NOTE (S2): this
+        # top-k denominator UNDER-estimates logsumexp(full V), so span_logp is
+        # over-estimated by a gap that GROWS with entropy (more tail mass outside
+        # top-k) — a directional bias, not a constant the GRPO baseline can cancel.
+        # Set log_tail_gap=True to measure it (one extra full-V logsumexp in bf16).
+        k = int(topk) if topk else 2048
         seq_ll = torch.zeros(bsz, dtype=torch.float32, device=input_ids.device)
+        valid = torch.zeros(bsz, dtype=torch.bool, device=input_ids.device)
+        tail_gap = torch.zeros(bsz, dtype=torch.float32, device=input_ids.device)
         with torch.no_grad(), self.ulysses_sharding_manager:
             for s in range(0, bsz, mbs):
                 e = min(s + mbs, bsz)
@@ -2782,19 +2806,43 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                     use_cache=False,
                     return_dict=True,
                 )
-                logits = (out[0] if isinstance(out, tuple) else out.logits).float()
-                # logp of token[t+1] given prefix up to t
-                logp = verl_F.logprobs_from_logits(logits[:, :-1, :], input_ids[s:e, 1:])
+                logits = out[0] if isinstance(out, tuple) else out.logits  # bf16, [mb, seq, V]
+                kk = min(k, logits.shape[-1])
                 for j in range(s, e):
                     p_len, f_len = spans[j]
-                    # response token at input pos k (p_len..f_len-1) predicted by logits[k-1]
-                    # → logp index k-1, valid range [p_len-1 : f_len-1]
+                    # response token at input pos m (p_len..f_len-1) predicted by logits[m-1]
+                    # → logp index m-1, valid range [p_len-1 : f_len-1]
                     lo = max(p_len - 1, 0)
                     hi = f_len - 1
-                    span_logp = logp[j - s, lo:hi]
+                    if hi <= lo:
+                        continue  # degenerate span -> valid[j] stays False (S4)
+                    span = logits[j - s, lo:hi, :]              # bf16 view [span, V]
+                    targets = input_ids[j, lo + 1:hi + 1]       # [span]
+                    # exact numerator (single gather, no full-vocab fp32 copy)
+                    tgt_logit = span.gather(-1, targets.unsqueeze(-1)).squeeze(-1).float()
+                    # approx denominator via top-k logsumexp (fp32 only on [span, k])
+                    topk_vals = span.topk(kk, dim=-1).values.float()
+                    denom = torch.logsumexp(topk_vals, dim=-1)  # [span]
+                    span_logp = tgt_logit - denom
                     if span_logp.numel() > 0:
                         seq_ll[j] = span_logp.sum() / span_logp.numel()
-        return seq_ll
+                        valid[j] = True
+                        if log_tail_gap:
+                            # Exact partition over full V, CHUNKED over span rows so the
+                            # transient never exceeds [ROWS, V]. A one-shot span.float()
+                            # would be span_len*V*4 (~1.6-3.2GB) plus an equal-size exp()
+                            # buffer, right next to the resident [mb, seq, V] logits
+                            # (~13GB) -> OOM on a 24GB card. Row-chunking caps peak at
+                            # ROWS*V*4 (~0.1GB) regardless of span length.
+                            ROWS = 128
+                            fd = torch.empty(span.shape[0], dtype=torch.float32, device=span.device)
+                            for r in range(0, span.shape[0], ROWS):
+                                fd[r:r + ROWS] = torch.logsumexp(span[r:r + ROWS].float(), dim=-1)
+                            tail_gap[j] = (denom - fd).mean()  # <=0; report magnitude below
+                del logits
+        # report the bias as a positive magnitude: logsumexp(fullV) - logsumexp(topk) >= 0
+        tail_gap = tail_gap.neg()
+        return seq_ll, valid, tail_gap
 
     @register(dispatch_mode=make_nd_compute_dataproto_dispatch_fn(mesh_name="reward"))
     @DistProfiler.annotate(color="brown")
@@ -2838,11 +2886,18 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                     "surface_reward_cross_vocab=True requires reward_model.model.input_tokenizer "
                     "(student tokenizer) to be set so the RM worker can decode/re-tokenize."
                 )
-            seq_ll = self._compute_surface_reward_cross_vocab(data)
-            if self.rank == 0:
-                print(f"[xvocab surface] seq_ll mean={seq_ll.mean().item():.4f} "
-                      f"std={seq_ll.std().item():.4f} bsz={seq_ll.numel()}")
-            return DataProto.from_dict(tensors={"teacher_surface_ll": seq_ll})
+            surface_topk = int(data.meta_info.get("surface_reward_topk", 2048) or 2048)
+            surface_max_length = data.meta_info.get("surface_reward_max_length", None)
+            surface_log_tail_gap = bool(data.meta_info.get("surface_reward_log_tail_gap", False))
+            seq_ll, valid, tail_gap = self._compute_surface_reward_cross_vocab(
+                data, topk=surface_topk, max_length=surface_max_length,
+                log_tail_gap=surface_log_tail_gap,
+            )
+            return DataProto.from_dict(tensors={
+                "teacher_surface_ll": seq_ll,
+                "teacher_surface_valid": valid,
+                "teacher_surface_tail_gap": tail_gap,
+            })
         rep_distillation_positions = data.meta_info.get("rep_distillation_positions", "last")
         rep_distillation_layers = data.meta_info.get("rep_distillation_layers", "last")
         rep_distillation_last_k = int(data.meta_info.get("rep_distillation_last_k", 32))

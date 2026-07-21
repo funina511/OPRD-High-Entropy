@@ -8,7 +8,7 @@ export OPRD_CONDA_SH=${OPRD_CONDA_SH:-/root/siton-tmp/home/liuxinyu/miniconda3/e
 export OPRD_CONDA_ENV=${OPRD_CONDA_ENV:-verl}
 export OPRD_CONDA_BIN=${OPRD_CONDA_BIN:-/root/siton-tmp/home/liuxinyu/miniconda3/envs/verl/bin}
 
-# --- network: wandb online THROUGH the clash proxy (direct GraphQL times out here) ---
+# --- network: wandb online THROUGH the clash proxy ---
 export NO_PROXY=localhost,127.0.0.1,0.0.0.0
 export no_proxy="$NO_PROXY"
 export HTTP_PROXY="${HTTP_PROXY:-${http_proxy:-http://127.0.0.1:7890}}"

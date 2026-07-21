@@ -603,28 +603,6 @@ def pool_by_assignment(
     return out / counts.clamp_min(1.0).unsqueeze(1)
 
 
-def chunk_pool_single_layer(
-    repr: torch.Tensor,
-    position_mask: torch.Tensor | None,
-    num_chunks: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Pool one layer's per-token repr into <=num_chunks contiguous chunk vectors per row.
-
-    repr: (B, S, D); position_mask: (B, S) or None (all valid).
-    Returns (chunk_vecs (N, D), resp_ids (N,)) where N = sum_b min(T_b, num_chunks).
-    A collapsed row (few valid tokens T_b) yields only T_b chunks -> extra collapse signal.
-    Vectorized via compute_chunk_assignment + pool_by_assignment (see those for exact
-    tensor_split semantics).
-    """
-    B, S, D = repr.shape
-    if position_mask is None:
-        position_mask = repr.new_ones(B, S)
-    token_pos, token_gid, resp_ids, N = compute_chunk_assignment(position_mask, num_chunks)
-    if N == 0:
-        return repr.new_zeros(0, D), repr.new_zeros(0, dtype=torch.long)
-    return pool_by_assignment(repr, token_pos, token_gid, N), resp_ids
-
-
 def rkd_distance_loss(
     s_chunks: torch.Tensor,
     t_chunks: torch.Tensor,

@@ -123,10 +123,15 @@ def get_fsdp_wrap_policy(module, config=None, is_lora=False):
         transformer_cls_to_wrap = set()
         for layer_class in fsdp_transformer_layer_cls_to_wrap:
             transformer_cls = get_module_class_from_name(module, layer_class)
-            if transformer_cls is None:
-                raise Exception("Could not find the transformer layer class to wrap in the model.")
-            else:
+            # A model's `_no_split_modules` may list layer classes that aren't
+            # actually present in this particular instance — e.g. a text-only
+            # extraction of a multimodal model (Gemma3ForCausalLM still declares
+            # the SigLIP vision classes it no longer contains). Skip the missing
+            # ones and only fail if NONE of the declared classes resolve.
+            if transformer_cls is not None:
                 transformer_cls_to_wrap.add(transformer_cls)
+        if len(transformer_cls_to_wrap) == 0:
+            raise Exception("Could not find the transformer layer class to wrap in the model.")
 
         transformer_policy = functools.partial(
             transformer_auto_wrap_policy,

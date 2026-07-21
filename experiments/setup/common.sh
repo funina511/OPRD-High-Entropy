@@ -54,7 +54,9 @@ export TRANSFORMERS_OFFLINE=${TRANSFORMERS_OFFLINE:-1}
 
 # --- hardware knobs shared across hosts (device list / gpu count set by host) -
 export CUDA_LAUNCH_BLOCKING=0
-export RAY_PORT=${RAY_PORT:-6379}
+# NOT 6379: that is Redis's standard port, so any host running Redis would collide
+# with Ray's GCS. Host profiles can still override RAY_PORT.
+export RAY_PORT=${RAY_PORT:-6399}
 export SKIP_RAY_STOP=${SKIP_RAY_STOP:-1}      # never kill another run's ray cluster
 
 # --- model/data paths: derived from host MODEL_DIR/DATA_DIR (names are shared) -

@@ -153,6 +153,13 @@ class RolloutConfig(BaseConfig):
     # student text, re-tokenizes with the teacher tokenizer, and returns a length-
     # normalized scalar seq_ll (teacher token-mean logp) instead of per-token logp.
     surface_reward_cross_vocab: bool = False
+    # Cross-vocab surface tuning (previously read from a non-existent reward_model
+    # field, so silently pinned to defaults). topk: partition-function top-k width;
+    # max_length: teacher-side truncation cap (None -> student attention length);
+    # log_tail_gap: measure the S2 top-k denominator bias (one extra full-V logsumexp).
+    surface_reward_topk: int = 2048
+    surface_reward_max_length: Optional[int] = None
+    surface_reward_log_tail_gap: bool = False
 
     disable_log_stats: bool = True
 

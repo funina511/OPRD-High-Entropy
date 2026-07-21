@@ -1166,6 +1166,17 @@ class RayPPOTrainer:
                                     "surface_reward_cross_vocab", False
                                 )
                             )
+                            # Cross-vocab surface tuning knobs (now schema-backed, so
+                            # +actor_rollout_ref.rollout.surface_reward_topk=N works).
+                            batch.meta_info["surface_reward_topk"] = (
+                                self.config.actor_rollout_ref.rollout.get("surface_reward_topk", 2048)
+                            )
+                            batch.meta_info["surface_reward_max_length"] = (
+                                self.config.actor_rollout_ref.rollout.get("surface_reward_max_length", None)
+                            )
+                            batch.meta_info["surface_reward_log_tail_gap"] = (
+                                self.config.actor_rollout_ref.rollout.get("surface_reward_log_tail_gap", False)
+                            )
                             batch.meta_info["rep_distillation_positions"] = (
                                 self.config.actor_rollout_ref.actor.get("rep_distillation_positions", "last")
                             )
@@ -1199,7 +1210,6 @@ class RayPPOTrainer:
                             if not rep_distillation_only:
                                 with marked_timer("compute_log_prob", timing_raw, color="blue"):
                                     # First forward, get student top k ids and log probs
-                                    print("First forward, get student top k ids and log probs")
                                     old_log_prob = self.actor_rollout_wg.compute_log_prob(batch)
                                     batch = batch.union(old_log_prob)
 
@@ -1458,15 +1468,41 @@ class RayPPOTrainer:
                         # count); same-vocab reduces per-token teacher_full_logp with
                         # the student response mask.
                         seq_ll = None
+                        surf_valid = None  # (bsz,) bool: False = degenerate span (S4)
                         if "teacher_surface_ll" in batch.batch:
                             resp_mask = batch.batch["response_mask"]
                             seq_ll = batch.batch["teacher_surface_ll"].to(resp_mask.device).float()
+                            if "teacher_surface_valid" in batch.batch:
+                                surf_valid = batch.batch["teacher_surface_valid"].to(resp_mask.device).bool()
+                            if "teacher_surface_tail_gap" in batch.batch:
+                                tg = batch.batch["teacher_surface_tail_gap"].to(resp_mask.device).float()
+                                # only meaningful where measured (>0); report mean over valid
+                                tg_sel = tg[surf_valid] if surf_valid is not None else tg
+                                if tg_sel.numel() > 0:
+                                    metrics["surface/topk_tail_gap_mean"] = tg_sel.mean().detach().item()
+                                    metrics["surface/topk_tail_gap_max"] = tg_sel.max().detach().item()
                         elif "teacher_full_logp" in batch.batch:
                             resp_mask = batch.batch["response_mask"]
                             tfl = batch.batch["teacher_full_logp"].to(resp_mask.device)
                             valid = resp_mask.sum(-1).clamp(min=1)
                             seq_ll = (tfl * resp_mask).sum(-1) / valid  # (bsz,) length-normalized
+                            surf_valid = resp_mask.sum(-1) > 0  # empty response => invalid
                         if seq_ll is not None:
+                            # S4: degenerate samples must NOT get reward 0.0 — since seq_ll<0
+                            # always, 0.0 sits ABOVE the group mean and would earn positive
+                            # advantage. Fill them with the valid-sample mean (neutral vs the
+                            # baseline) and zero their advantage after compute_advantage.
+                            if surf_valid is not None and (~surf_valid).any():
+                                n_valid = surf_valid.sum()
+                                fill = (seq_ll[surf_valid].mean() if n_valid > 0
+                                        else torch.zeros((), device=seq_ll.device))
+                                seq_ll = torch.where(surf_valid, seq_ll, fill)
+                                metrics["surface/degenerate_frac"] = (
+                                    (~surf_valid).float().mean().detach().item()
+                                )
+                                self._surface_invalid_mask = ~surf_valid  # consumed post-advantage
+                            else:
+                                self._surface_invalid_mask = None
                             surf_reward = torch.zeros_like(batch.batch["token_level_rewards"])
                             last_idx = (resp_mask.long().cumsum(-1).argmax(-1))  # last valid token
                             rows = torch.arange(surf_reward.size(0), device=surf_reward.device)
@@ -1497,6 +1533,19 @@ class RayPPOTrainer:
                             norm_adv_by_std_in_grpo=norm_adv_by_std_in_grpo,
                             config=self.config.algorithm,
                         )
+
+                        # S4: kill gradient from degenerate surface samples. They were
+                        # filled with the valid-mean reward above (so they didn't skew the
+                        # GRPO baseline); now zero their advantage so they contribute no PG
+                        # signal at all.
+                        inv = getattr(self, "_surface_invalid_mask", None)
+                        if inv is not None and inv.any() and "advantages" in batch.batch:
+                            adv = batch.batch["advantages"]
+                            inv = inv.to(adv.device)
+                            adv[inv] = 0.0
+                            if "returns" in batch.batch:
+                                batch.batch["returns"][inv] = 0.0
+                            self._surface_invalid_mask = None
  
 
                         # --- Top-K Metrics Analysis (Chunked) ---

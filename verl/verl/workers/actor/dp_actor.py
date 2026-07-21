@@ -57,7 +57,6 @@ from verl.utils.rep_distillation import (
     forward_response_hidden_repr,
     hidden_states_tuple_to_response_repr,
     compute_rep_alignment_metrics,
-    multi_layer_normalized_cosine_similarity,
     multi_layer_normalized_mse_loss,
     multi_layer_rkd_distance_loss,
     multi_layer_infonce_loss,
@@ -1102,6 +1101,19 @@ class DataParallelPPOActor(BasePPOActor):
         rep_infonce_tau = float(self.config.get("rep_infonce_tau", 0.07))
         rep_infonce_mask_within = bool(self.config.get("rep_infonce_mask_within", False))
         rep_rkd_angle_coef = float(self.config.get("rep_rkd_angle_coef", 0.0))
+        # Guard: rkd/infonce pool tokens into chunks via pool_by_assignment, which
+        # requires a per-token (B, T, D) repr. positions="last" collapses the repr to
+        # (B, D) (single layer -> ValueError on B,S,D unpack) or (B, L, D) (multi-layer
+        # -> silently pools over the LAYER axis, garbage relations). Only mse tolerates
+        # the last-token 2-D case. Fail fast with an actionable message.
+        if use_rep_distillation and rep_align_loss in ("rkd", "infonce") and rep_distillation_positions == "last":
+            raise ValueError(
+                f"rep_align_loss={rep_align_loss!r} is incompatible with "
+                f"rep_distillation_positions='last' (chunk pooling needs per-token reprs). "
+                f"Use rep_distillation_positions in ('all', 'last_k', 'first_k')."
+            )
+        if use_rep_distillation and rep_align_loss == "infonce" and rep_infonce_tau <= 0.0:
+            raise ValueError(f"rep_infonce_tau must be > 0, got {rep_infonce_tau}")
 
         select_keys = [
             "responses",
