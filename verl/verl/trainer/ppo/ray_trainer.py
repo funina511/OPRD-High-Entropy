@@ -1177,6 +1177,19 @@ class RayPPOTrainer:
                             batch.meta_info["surface_reward_log_tail_gap"] = (
                                 self.config.actor_rollout_ref.rollout.get("surface_reward_log_tail_gap", False)
                             )
+                            # Exact full-vocab logsumexp denominator for cross-vocab surface
+                            # (removes the top-k partition-function bias S2). Surface-only fits it.
+                            batch.meta_info["surface_reward_exact_denom"] = (
+                                self.config.actor_rollout_ref.rollout.get("surface_reward_exact_denom", False)
+                            )
+                            # Route A: student-entropy coefficient for the surface reward.
+                            batch.meta_info["surface_student_entropy_coef"] = (
+                                self.config.actor_rollout_ref.rollout.get("surface_student_entropy_coef", 0.0)
+                            )
+                            # Surface entropy credit granularity: seq | token_raw | token_dual.
+                            batch.meta_info["surface_entropy_mode"] = (
+                                self.config.actor_rollout_ref.rollout.get("surface_entropy_mode", "seq")
+                            )
                             batch.meta_info["rep_distillation_positions"] = (
                                 self.config.actor_rollout_ref.actor.get("rep_distillation_positions", "last")
                             )
@@ -1481,12 +1494,78 @@ class RayPPOTrainer:
                                 if tg_sel.numel() > 0:
                                     metrics["surface/topk_tail_gap_mean"] = tg_sel.mean().detach().item()
                                     metrics["surface/topk_tail_gap_max"] = tg_sel.max().detach().item()
+                            # Route A (cross-vocab): r = teacher_mean_logp - lam * student_mean_logp.
+                            # teacher_surface_ll is ALREADY teacher-token-mean logp (normalized by
+                            # the teacher-side token count); the student term must likewise be
+                            # STUDENT-token-mean logp (normalized by the student response mask), so
+                            # both are per-token mean log-likelihoods (each a negative perplexity in
+                            # its OWN vocab) and are dimensionally comparable across tokenizers.
+                            # student logp is the detached old_log_probs -> reward stays constant.
+                            # Cross-vocab supports "seq" (fold lam here) or "token_dual" (entropy
+                            # injected per-token post-advantage -> DON'T fold here). "token_raw"
+                            # needs per-token teacher logp, which cross-vocab lacks, so it falls
+                            # back to the seq fold.
+                            lam = float(batch.meta_info.get("surface_student_entropy_coef", 0.0))
+                            ent_mode = str(batch.meta_info.get("surface_entropy_mode", "seq"))
+                            if lam != 0.0 and "old_log_probs" in batch.batch:
+                                slp = batch.batch["old_log_probs"].to(resp_mask.device)
+                                valid = resp_mask.sum(-1).clamp(min=1)
+                                student_ll = (slp * resp_mask).sum(-1) / valid  # student-token-mean
+                                if ent_mode != "token_dual":
+                                    seq_ll = seq_ll - lam * student_ll
+                                metrics["surface/student_ll_mean"] = student_ll.mean().detach().item()
+                                # per-token surrogate reverse-KL: student_mean_logp (student vocab)
+                                # minus teacher_mean_logp (teacher vocab). Cross-vocab, so this is a
+                                # tokenizer-mismatched proxy, not an exact sequence KL; track trend.
+                                metrics["surface/seq_reverse_kl_mean"] = (
+                                    (student_ll - batch.batch["teacher_surface_ll"].to(resp_mask.device).float()).mean().detach().item()
+                                )
                         elif "teacher_full_logp" in batch.batch:
                             resp_mask = batch.batch["response_mask"]
                             tfl = batch.batch["teacher_full_logp"].to(resp_mask.device)
                             valid = resp_mask.sum(-1).clamp(min=1)
-                            seq_ll = (tfl * resp_mask).sum(-1) / valid  # (bsz,) length-normalized
-                            surf_valid = resp_mask.sum(-1) > 0  # empty response => invalid
+                            # Entropy modes (same-vocab has per-token teacher logp, so all 3 work):
+                            #   seq        : r = mean_t[logp_T - lam*logp_S], last-token scalar, GRPO.
+                            #   token_raw  : r_t = logp_T(y_t) - lam*logp_S(y_t) spread per-token,
+                            #                NO norm/baseline + token_reward_direct -> PG telescopes
+                            #                to logp_T(y)-lam*logp_S(y); lam=1 == OPD exactly.
+                            #   token_dual : teacher stays seq scalar (GRPO); entropy injected
+                            #                per-token post-advantage (same path as cross-vocab).
+                            lam = float(batch.meta_info.get("surface_student_entropy_coef", 0.0))
+                            ent_mode = str(batch.meta_info.get("surface_entropy_mode", "seq"))
+                            if lam != 0.0 and "old_log_probs" in batch.batch:
+                                slp = batch.batch["old_log_probs"].to(resp_mask.device)
+                                student_ll = (slp * resp_mask).sum(-1) / valid  # (bsz,)
+                                teacher_ll = (tfl * resp_mask).sum(-1) / valid  # (bsz,)
+                                metrics["surface/student_ll_mean"] = student_ll.mean().detach().item()
+                                # sequence-level reverse-KL proxy = mean_t[logp_S - logp_T]
+                                metrics["surface/seq_reverse_kl_mean"] = (
+                                    (student_ll - teacher_ll).mean().detach().item()
+                                )
+                                # seq folds lam into the scalar; token_raw folds into per-token
+                                # (handled below); token_dual keeps teacher pure (entropy added later).
+                                per_tok = (tfl - lam * slp) if ent_mode == "seq" else tfl
+                            else:
+                                per_tok = tfl
+                            if ent_mode == "token_raw":
+                                # RAW per-token reward, NO length norm, spread over response.
+                                # Requires ADV_ESTIMATOR=token_reward_direct (PG sum telescopes).
+                                pt = (tfl - lam * slp) if (lam != 0.0 and "old_log_probs" in batch.batch) else tfl
+                                surf_reward = (pt * resp_mask).to(
+                                    batch.batch["token_level_rewards"].dtype
+                                )
+                                batch.batch["token_level_rewards"] = surf_reward
+                                metrics["surface/teacher_ll_mean"] = (
+                                    ((tfl * resp_mask).sum(-1) / valid).mean().detach().item()
+                                )
+                                metrics["surface/per_tok_reward_mean"] = (
+                                    ((pt * resp_mask).sum(-1) / valid).mean().detach().item()
+                                )
+                                seq_ll = None  # skip the sequence-scalar path below
+                                self._surface_invalid_mask = None
+                            else:
+                                seq_ll = (per_tok * resp_mask).sum(-1) / valid  # length-normalized
+                                surf_valid = resp_mask.sum(-1) > 0  # empty response => invalid
                         if seq_ll is not None:
                             # S4: degenerate samples must NOT get reward 0.0 — since seq_ll<0
                             # always, 0.0 sits ABOVE the group mean and would earn positive
@@ -1546,7 +1625,55 @@ class RayPPOTrainer:
                             if "returns" in batch.batch:
                                 batch.batch["returns"][inv] = 0.0
                             self._surface_invalid_mask = None
- 
+
+                        # --- token_dual (plan A): per-token entropy term, PER-SEQ de-meaned only ---
+                        #   A_t += lam * ( -logp_S(y_t) - mean_t(-logp_S) )      [raw nats, NO std div]
+                        # Teacher rode compute_advantage as a GRPO seq scalar with the group-mean
+                        # baseline but NO std normalization (NORM_ADV_BY_STD=False), so it keeps its
+                        # absolute nats scale (~group-std of logp_T) instead of being flattened to
+                        # unit RMS -> teacher stays strong enough to fight the entropy push.
+                        #
+                        # CRITICAL FIX vs the earlier std-normalized version: dividing by the batch
+                        # std of the entropy term created a POSITIVE feedback loop -- as the policy
+                        # got more uniform, -logp_S(y_t) converged across tokens, its std SHRANK
+                        # (observed 2.24 -> 0.64), so dividing by it AMPLIFIED the entropy gradient
+                        # -> runaway to uniform (entropy ~= log|V|). Per-seq de-mean WITHOUT std has
+                        # the OPPOSITE, self-correcting behavior: as the policy approaches uniform,
+                        # -logp_S(y_t) -> log|V| for every t, the per-seq mean -> log|V| too, so
+                        # (ent_tok - ent_mean) -> 0 and the entropy advantage VANISHES on its own.
+                        # This is the same natural negative feedback that makes token_raw stable.
+                        #
+                        # Per-seq de-mean is a valid per-token constant baseline (E_pi[grad logpi]=0,
+                        # unbiased) and strips the per-response difficulty/length confound, leaving
+                        # "which tokens are over-confident RELATIVE TO THIS RESPONSE's own average".
+                        # Only touches the student's OWN token logp -> works same-vocab AND cross-
+                        # vocab. lam is a raw-nats weight (teacher ~O(1), entropy raw ~O(2-3) -> tune
+                        # lam ~0.1-0.3). NOT OPD (teacher term is sequence-level; cross-vocab has no
+                        # per-token teacher term) -- use token_raw same-vocab for the exact OPD anchor.
+                        _mode = str(batch.meta_info.get("surface_entropy_mode", "seq"))
+                        _lam = float(batch.meta_info.get("surface_student_entropy_coef", 0.0))
+                        if _mode == "token_dual" and _lam != 0.0 and "advantages" in batch.batch \
+                                and "old_log_probs" in batch.batch:
+                            adv = batch.batch["advantages"]
+                            rmask = batch.batch["response_mask"].to(adv.device).float()
+                            slp = batch.batch["old_log_probs"].to(adv.device)
+                            ent_tok = (-slp) * rmask  # per-token entropy reward, padding zeroed
+                            n_valid = rmask.sum(-1).clamp(min=1)
+                            ent_mean = (ent_tok.sum(-1) / n_valid).unsqueeze(-1)  # per-seq baseline
+                            ent_adv = (ent_tok - ent_mean) * rmask  # de-meaned, padding zeroed; NO std
+                            batch.batch["advantages"] = adv + _lam * ent_adv
+                            if "returns" in batch.batch:
+                                batch.batch["returns"] = batch.batch["returns"] + _lam * ent_adv
+                            metrics["surface/entropy_adv_abs_mean"] = (
+                                (_lam * ent_adv.abs() * rmask).sum().detach().item()
+                                / rmask.sum().clamp(min=1).item()
+                            )
+                            # diagnostic only (NOT used to normalize): watch it stay bounded, not ->0
+                            m = rmask.bool()
+                            vals = ent_adv[m]
+                            if vals.numel() > 1:
+                                metrics["surface/entropy_raw_std"] = vals.std().detach().item()
+
 
                         # --- Top-K Metrics Analysis (Chunked) ---
                         if "overlap_mask" in batch.batch.keys() and "advantages" in batch.batch.keys():

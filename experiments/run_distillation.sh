@@ -231,6 +231,7 @@ sleep 5
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=$ADV_ESTIMATOR \
     algorithm.grpo_outcome_weight=$GRPO_OUTCOME_WEIGHT \
+    algorithm.norm_adv_by_std_in_grpo=${NORM_ADV_BY_STD:-True} \
     data.shuffle=False \
     data.train_files="$TRAIN_DATASET" \
     data.val_files="$TEST_DATASET" \
@@ -301,6 +302,9 @@ python3 -m verl.trainer.main_ppo \
     +actor_rollout_ref.rollout.use_token_kl_reward=${USE_TOKEN_KL_REWARD:-True} \
     +actor_rollout_ref.rollout.use_surface_reward=${USE_SURFACE_REWARD:-False} \
     +actor_rollout_ref.rollout.surface_reward_cross_vocab=${SURFACE_REWARD_CROSS_VOCAB:-False} \
+    +actor_rollout_ref.rollout.surface_reward_exact_denom=${SURFACE_REWARD_EXACT_DENOM:-False} \
+    +actor_rollout_ref.rollout.surface_student_entropy_coef=${SURFACE_STUDENT_ENTROPY_COEF:-0.0} \
+    +actor_rollout_ref.rollout.surface_entropy_mode=${SURFACE_ENTROPY_MODE:-seq} \
     actor_rollout_ref.rollout.tensor_model_parallel_size=$PARALLEL_SIZE \
     actor_rollout_ref.rollout.gpu_memory_utilization=${GPU_MEM_UTIL:-0.8} \
     actor_rollout_ref.rollout.max_model_len=$MAX_MODEL_LEN \

@@ -19,8 +19,19 @@ export https_proxy="$HTTPS_PROXY"
 unset ALL_PROXY all_proxy
 
 # --- hardware ---
+# This box is a SINGLE NVIDIA H200 NVL (143 GB HBM), not the 4x3090 in the README.
 export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
 export N_GPUS_PER_NODE=${N_GPUS_PER_NODE:-1}
+
+# --- memory (single 143 GB card, PARALLEL_SIZE=1) ---
+# The student (Qwen3-0.6B) is tiny, so vLLM's KV-cache reservation dwarfs everything
+# else. Cap it at 0.6 (~86 GB) so the <=4B teacher/RM forward + actor FSDP have ~57 GB
+# of headroom and never collide with the reservation. Surface-only skips hidden
+# extraction entirely, so 8192-token rollouts fit comfortably here.
+export GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.6}
+# Park the teacher/RM weights on CPU when not scoring — cheap insurance against the
+# worst-case "vLLM reservation + 4B teacher resident at once" overlap.
+export REWARD_PARAM_OFFLOAD=${REWARD_PARAM_OFFLOAD:-True}
 
 # --- paths ---
 export OPRD_REPO_ROOT=${OPRD_REPO_ROOT:-/root/siton-tmp/home/liuxinyu/OPRD-High-Entropy}

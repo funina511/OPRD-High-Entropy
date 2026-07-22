@@ -160,6 +160,33 @@ class RolloutConfig(BaseConfig):
     surface_reward_topk: int = 2048
     surface_reward_max_length: Optional[int] = None
     surface_reward_log_tail_gap: bool = False
+    # Cross-vocab surface: use the EXACT full-vocab logsumexp partition function
+    # (chunked over span rows) instead of the top-k approximation. Removes the S2
+    # denominator bias entirely at the cost of one full-V reduction; affordable in
+    # surface-only runs (hidden-repr extraction is off). Ignored same-vocab.
+    surface_reward_exact_denom: bool = False
+    # Surface entropy term (route A): subtract lambda * detached student per-token
+    # logp from the teacher-LL reward. 0.0 = pure surface (E[logp_T]); 1.0 = full
+    # sequence-level OPD (E[logp_T] + H(pi), telescoped). Adds back the student
+    # entropy term that pure surface drops, reversing low-entropy mode collapse.
+    # Same-vocab only (needs aligned per-token student logp); ignored cross-vocab.
+    surface_student_entropy_coef: float = 0.0
+    # Surface entropy credit granularity (how the -lam*logp_S term enters):
+    #   "seq"        : fold into the last-token sequence scalar, GRPO-baselined
+    #                  (route A). Same/cross-vocab. lam=1 is NOT token-OPD (loses
+    #                  per-token credit -> empirically collapses to low entropy).
+    #   "token_raw"  : SAME-VOCAB ONLY. r_t = logp_T(y_t) - lam*logp_S(y_t) spread
+    #                  per-token (no norm, no baseline) + token_reward_direct, so the
+    #                  PG sum telescopes to logp_T(y) - lam*logp_S(y). lam=1 == OPD
+    #                  EXACTLY (both terms same per-token nats scale -> auto-balanced).
+    #                  This is the clean same-vocab anchor.
+    #   "token_dual" : DUAL-CHANNEL (works cross-vocab). Teacher term rides as the
+    #                  GRPO seq scalar (std-normalized -> ~unit RMS); the entropy term
+    #                  -lam*logp_S(y_t) is injected PER-TOKEN post-advantage, itself
+    #                  per-seq de-meaned and BATCH-std-normalized to ~unit RMS. lam is
+    #                  then a dimensionless teacher/entropy pressure ratio (NOT OPD;
+    #                  cross-vocab has no per-token teacher term, so exact OPD is out).
+    surface_entropy_mode: str = "seq"
 
     disable_log_stats: bool = True
 

@@ -2764,7 +2764,7 @@ class RewardModelWorker(Worker, DistProfilerExtension):
         return rm_data, spans
 
     def _compute_surface_reward_cross_vocab(self, data: DataProto, topk=2048, max_length=None,
-                                            log_tail_gap=False):
+                                            log_tail_gap=False, exact_denom=False):
         """Teacher sequence log-likelihood of the student's decoded text, in the
         TEACHER's own vocabulary. Returns (seq_ll, valid, tail_gap), each (bsz,):
         - seq_ll: length-normalized scalar teacher token-mean logp (0.0 where invalid)
@@ -2820,9 +2820,20 @@ class RewardModelWorker(Worker, DistProfilerExtension):
                     targets = input_ids[j, lo + 1:hi + 1]       # [span]
                     # exact numerator (single gather, no full-vocab fp32 copy)
                     tgt_logit = span.gather(-1, targets.unsqueeze(-1)).squeeze(-1).float()
-                    # approx denominator via top-k logsumexp (fp32 only on [span, k])
-                    topk_vals = span.topk(kk, dim=-1).values.float()
-                    denom = torch.logsumexp(topk_vals, dim=-1)  # [span]
+                    if exact_denom:
+                        # Exact partition over full V, CHUNKED over span rows so the
+                        # fp32 transient never exceeds [ROWS, V] (~0.1GB at ROWS=128,
+                        # V~200k) — same guard as the tail_gap path below. Removes the
+                        # top-k denominator bias (S2) entirely. Surface-only fits this
+                        # since the ~9.5GB/step hidden-repr extraction is off.
+                        ROWS = 128
+                        denom = torch.empty(span.shape[0], dtype=torch.float32, device=span.device)
+                        for r in range(0, span.shape[0], ROWS):
+                            denom[r:r + ROWS] = torch.logsumexp(span[r:r + ROWS].float(), dim=-1)
+                    else:
+                        # approx denominator via top-k logsumexp (fp32 only on [span, k])
+                        topk_vals = span.topk(kk, dim=-1).values.float()
+                        denom = torch.logsumexp(topk_vals, dim=-1)  # [span]
                     span_logp = tgt_logit - denom
                     if span_logp.numel() > 0:
                         seq_ll[j] = span_logp.sum() / span_logp.numel()
@@ -2889,9 +2900,10 @@ class RewardModelWorker(Worker, DistProfilerExtension):
             surface_topk = int(data.meta_info.get("surface_reward_topk", 2048) or 2048)
             surface_max_length = data.meta_info.get("surface_reward_max_length", None)
             surface_log_tail_gap = bool(data.meta_info.get("surface_reward_log_tail_gap", False))
+            surface_exact_denom = bool(data.meta_info.get("surface_reward_exact_denom", False))
             seq_ll, valid, tail_gap = self._compute_surface_reward_cross_vocab(
                 data, topk=surface_topk, max_length=surface_max_length,
-                log_tail_gap=surface_log_tail_gap,
+                log_tail_gap=surface_log_tail_gap, exact_denom=surface_exact_denom,
             )
             return DataProto.from_dict(tensors={
                 "teacher_surface_ll": seq_ll,

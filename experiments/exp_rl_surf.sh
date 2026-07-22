@@ -33,9 +33,11 @@ export USE_SURFACE_REWARD=True
 export USE_TOKEN_KL_REWARD=False
 export ENABLE_FORMAT_REWARD=False
 export ADV_ESTIMATOR=${ADV_ESTIMATOR:-grpo}
-# n=2: matches arms B/C rollout budget and fits 4x3090 (n=4 OOMs in the teacher
-# hidden-repr extraction). Plain assignment so it's explicit vs common.sh's preset.
-export N_RESPONSES=2
+# n: GRPO's within-group baseline needs a large enough group or the std-normalized
+# advantage collapses to a sign bit (at n=2, adv == +-1/sqrt(2) regardless of the
+# teacher-LL gap). Default lifted to 8; override via N_RESPONSES env. The old n=2 was
+# a 4x3090 memory limit, not a modeling choice.
+export N_RESPONSES=${N_RESPONSES:-8}
 
 export EXPERIMENT_NAME=${EXPERIMENT_NAME:-armA_surf_$(date +%Y-%m-%d_%H-%M-%S)}
 run_experiment oprd
