@@ -54,12 +54,15 @@ export SURFACE_ENTROPY_MODE=${SURFACE_ENTROPY_MODE:-seq}
 export SURFACE_STUDENT_ENTROPY_COEF=${SURFACE_STUDENT_ENTROPY_COEF:-0.5}
 export NORM_ADV_BY_STD=${NORM_ADV_BY_STD:-True}
 
-# --- scale matched to cmp_surf_n8_r8192 (budget-fair baseline comparison) ---
-export N_RESPONSES=${N_RESPONSES:-8}
-export MAX_RESP_LENGTH=${MAX_RESP_LENGTH:-8192}
-export MAX_VAL_RESP_LENGTH=${MAX_VAL_RESP_LENGTH:-8192}
-export MINI_BATCH_SIZE=${MINI_BATCH_SIZE:-8}
-export TOTAL_TRAINING_STEPS=${TOTAL_TRAINING_STEPS:-150}
+# --- scale HARD-PINNED to cmp_surf_n8_r8192 (n=8, resp=8192, mbs=8, steps=150).
+#     Written with plain '=' (NOT ':-') so any stale env values from the shell
+#     session CANNOT override them — this run must be scale-identical to the
+#     baseline or the comparison is meaningless. Use a different script to sweep. ---
+export N_RESPONSES=8
+export MAX_RESP_LENGTH=8192
+export MAX_VAL_RESP_LENGTH=8192
+export MINI_BATCH_SIZE=8
+export TOTAL_TRAINING_STEPS=150
 
 _LAM_TAG=$(printf "%s" "$SURFACE_STUDENT_ENTROPY_COEF" | tr '.' 'p')
 export EXPERIMENT_NAME=${EXPERIMENT_NAME:-armAx_surf_ent_seq_lam${_LAM_TAG}_$(date +%Y-%m-%d_%H-%M-%S)}
